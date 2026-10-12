@@ -91,6 +91,7 @@ mkdir -p "$AQB_TEST_BIN_DIR"
 # 格式：test_name|编译命令
 # 每次新增 C 测试源文件时，在此添加一行即可。
 COMPILE_RULES=(
+    "kv_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/kv/case_unit.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/kv_unit"
 )
 
 for rule in "${COMPILE_RULES[@]}"; do
@@ -288,7 +289,7 @@ echo -e "  case 总数: ${TOTAL_CASES}${NC}"
 
 if [ "$TOTAL_FAIL" -eq 0 ]; then
     echo -e "${GREEN}✔ 全部测试通过${NC}"
-    rm -rf "$AQB_TEST_BIN_DIR"
+    rm -rf "$AQB_TEST_BIN_DIR" "$TEST_TMP_DIR"
     exit 0
 else
     echo -e "${RED}✘ 存在失败的测试${NC}"

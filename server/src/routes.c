@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include <microhttpd.h>
 
@@ -14,6 +15,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "db.h"
+#include "kv_store.h"
 #include "routes.h"
 
 /* ── 密码哈希（与 db.c 保持一致的算法和 salt） ── */
@@ -242,6 +244,50 @@ static enum MHD_Result handle_me(struct MHD_Connection *conn) {
 
 /* ── 固定题目接口（管理员与学生使用同一只读接口） ── */
 
+static cJSON *kv_to_question(const char *key, sqlite3 *db) {
+    char *json = kv_get_all(db, "qdata", key);
+    if (json == NULL) return NULL;
+
+    cJSON *arr = cJSON_Parse(json);
+    cJSON_free(json);
+    if (arr == NULL || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return NULL; }
+
+    /* 无数据 = 题目不存在 */
+    int size = cJSON_GetArraySize(arr);
+    if (size == 0) { cJSON_Delete(arr); return NULL; }
+
+    cJSON *obj = cJSON_CreateObject();
+    if (obj == NULL) { cJSON_Delete(arr); return NULL; }
+    {
+        int id_val;
+        if (kv_str_to_int(key, &id_val) == 0 && id_val > 0)
+            cJSON_AddNumberToObject(obj, "id", id_val);
+        else
+            cJSON_AddNumberToObject(obj, "id", 0);
+    }
+
+    for (int i = 0; i < size; i++) {
+        cJSON *item = cJSON_GetArrayItem(arr, i);
+        cJSON *name = cJSON_GetObjectItem(item, "name");
+        cJSON *val  = cJSON_GetObjectItem(item, "value");
+        if (name == NULL || val == NULL || !cJSON_IsString(name) || !cJSON_IsString(val))
+            continue;
+        const char *n = name->valuestring;
+        const char *v = val->valuestring;
+        /* 跳过内部字段 */
+        if (strcmp(n, "seed_key") == 0 || strcmp(n, "teacher_id") == 0)
+            continue;
+        if (strcmp(n, "options") == 0 || strcmp(n, "knowledge_points") == 0) {
+            cJSON *parsed = cJSON_Parse(v);
+            cJSON_AddItemToObject(obj, n, parsed ? parsed : cJSON_CreateArray());
+        } else {
+            cJSON_AddStringToObject(obj, n, v);
+        }
+    }
+    cJSON_Delete(arr);
+    return obj;
+}
+
 static enum MHD_Result handle_questions(struct MHD_Connection *conn,
                                         const char *url, const char *method,
                                         const AppConfig *cfg) {
@@ -262,13 +308,37 @@ static enum MHD_Result handle_questions(struct MHD_Connection *conn,
         return ret;
     }
 
-    char *json = NULL;
-    DbQuestionResult result;
+    /* 读接口不创建空数据库；数据库丢失应是 500，不能伪装成空列表或 404。 */
+    if (access(cfg->db_path, R_OK) != 0) {
+        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                          "{\"error\":\"query questions failed\"}");
+    }
+
     if (strcmp(url, "/api/v1/questions") == 0) {
-        result = db_list_questions(cfg->db_path, &json);
+        /* 列表：遍历 kv_store 中的 questions namespace */
+        int count;
+        char **keys = kv_list_keys(cfg->db, "qdata", &count);
+        if (keys == NULL) {
+            return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                              "{\"error\":\"query questions failed\"}");
+        }
+
+        cJSON *root = cJSON_CreateObject();
+        cJSON *arr  = cJSON_AddArrayToObject(root, "questions");
+        for (int i = 0; i < count; i++) {
+            cJSON *q = kv_to_question(keys[i], cfg->db);
+            if (q) cJSON_AddItemToArray(arr, q);
+        }
+        kv_free_str_array(keys);
+
+        char *json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
+        cJSON_free(json);
+        return ret;
     } else {
+        /* 单题查询 */
         const char *id_text = url + sizeof("/api/v1/questions/") - 1;
-        /* 只接受完整的正整数，拒绝符号、小数、溢出与额外路径段。 */
         if (*id_text == '\0') {
             return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
         }
@@ -284,19 +354,23 @@ static enum MHD_Result handle_questions(struct MHD_Connection *conn,
         if (errno == ERANGE || end == id_text || *end != '\0' || id <= 0) {
             return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
         }
-        result = db_get_question(cfg->db_path, (int64_t)id, &json);
-    }
 
-    if (result == DB_QUESTION_NOT_FOUND) {
-        return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+        char key[32];
+        snprintf(key, sizeof(key), "%lld", id);
+
+        cJSON *question = kv_to_question(key, cfg->db);
+        if (question == NULL) {
+            return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+        }
+
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddItemToObject(root, "question", question);
+        char *json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
+        cJSON_free(json);
+        return ret;
     }
-    if (result != DB_QUESTION_OK) {
-        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                          "{\"error\":\"query questions failed\"}");
-    }
-    enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
-    cJSON_free(json);
-    return ret;
 }
 
 /* ── 静态文件服务 ── */

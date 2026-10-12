@@ -1,17 +1,95 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI+题库智能教学平台</title>
-    <link rel="stylesheet" href="/css/style.css" />
-  </head>
-  <body>
-    <main class="page">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI+题库智能教学平台</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <!-- 顶部导航栏 -->
+  <header id="navbar" class="navbar hidden">
+    <div class="navbar-inner">
+      <span class="navbar-brand">AI+题库</span>
+      <span class="navbar-user" id="userInfo"></span>
+      <button class="btn btn-sm" id="logoutBtn" onclick="app.logout()">退出</button>
+    </div>
+  </header>
+
+  <!-- ====== 登录页 ====== -->
+  <div id="page-login" class="page page-center">
+    <div class="login-card">
       <h1>AI+题库智能教学平台</h1>
-      <p>前端骨架已就绪（由 C 服务端直接托管的静态页面，无构建工具链）。</p>
-      <p>后端状态：<span id="health">检查中…</span></p>
-    </main>
-    <script src="/js/app.js"></script>
-  </body>
+      <p class="login-subtitle">第一阶段 Demo</p>
+      <form id="loginForm" onsubmit="return app.login(event)">
+        <div class="form-group">
+          <label for="username">账号</label>
+          <input type="text" id="username" placeholder="admin / teacher / student" required autofocus />
+        </div>
+        <div class="form-group">
+          <label for="password">密码</label>
+          <input type="password" id="password" placeholder="请输入密码" required />
+        </div>
+        <div class="form-group">
+          <button type="submit" class="btn btn-primary btn-block" id="loginBtn">登 录</button>
+        </div>
+        <p class="login-hint">测试账号：admin(管理员) / teacher(老师) / student(学生)<br/>默认密码均为：xxx123</p>
+      </form>
+      <p id="loginError" class="login-error hidden"></p>
+    </div>
+  </div>
+
+  <!-- ====== 题目列表页 ====== -->
+  <div id="page-questions" class="page hidden">
+    <div class="container">
+      <h2>题目列表</h2>
+      <div id="questionsLoading" class="loading">加载中...</div>
+      <div id="questionsError" class="error-box hidden"></div>
+      <div id="questionsList" class="questions-list"></div>
+    </div>
+  </div>
+
+  <!-- ====== 对话页 ====== -->
+  <div id="page-chat" class="page hidden">
+    <div class="container chat-layout">
+      <div class="chat-header">
+        <button class="btn btn-sm" onclick="app.navigate('#questions')">← 返回列表</button>
+        <h2 id="chatQuestionTitle">题目详情</h2>
+      </div>
+
+      <!-- 题目详情区 -->
+      <div id="questionDetail" class="question-detail">
+        <div id="detailLoading" class="loading">加载题目中...</div>
+        <div id="detailError" class="error-box hidden"></div>
+        <div id="detailContent" class="hidden">
+          <p class="q-content" id="qContent"></p>
+          <div id="qOptions" class="q-options"></div>
+          <div class="q-meta">
+            <span class="q-type" id="qType"></span>
+            <span class="q-knowledge" id="qKnowledge"></span>
+          </div>
+          <details class="q-answer">
+            <summary>查看答案与解析</summary>
+            <p><strong>答案：</strong><span id="qAnswer"></span></p>
+            <p><strong>解析：</strong><span id="qAnalysis"></span></p>
+          </details>
+        </div>
+      </div>
+
+      <!-- 对话区 -->
+      <div id="chatMessages" class="chat-messages"></div>
+
+      <div class="chat-input-bar">
+        <input type="text" id="chatInput" placeholder="输入你的问题或疑问..." />
+        <button class="btn btn-primary" id="chatSendBtn" onclick="app.sendChat()">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/questions.js"></script>
+  <script src="/js/chat.js"></script>
+  <script src="/js/app.js"></script>
+</body>
 </html>

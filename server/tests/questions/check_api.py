@@ -40,7 +40,7 @@ def login(username):
 
 def check_question(question):
     assert set(question) == {"id", "content", "options", "answer", "analysis",
-                             "knowledge_points", "type"}
+                             "knowledge_points", "type", "status"}
     assert isinstance(question["id"], int) and question["id"] > 0
     for key in ("content", "answer", "analysis"):
         assert isinstance(question[key], str) and question[key]

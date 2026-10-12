@@ -1,19 +1,166 @@
-* {
-  box-sizing: border-box;
-}
-
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body {
-  margin: 0;
-  font-family: system-ui, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #f0f2f5;
   color: #1f2328;
-  background: #f6f8fa;
+  min-height: 100vh;
 }
 
-.page {
+/* ── Utility ── */
+.hidden { display: none !important; }
+.container { max-width: 800px; margin: 0 auto; padding: 16px; }
+.loading { text-align: center; padding: 40px; color: #666; font-size: 15px; }
+.error-box {
+  background: #fff0f0; border: 1px solid #f87171; border-radius: 8px;
+  padding: 12px 16px; margin: 12px 0; color: #b91c1c; font-size: 14px;
+}
+
+/* ── Navbar ── */
+.navbar {
+  background: #1f2937; color: #fff; padding: 0 16px;
+  position: sticky; top: 0; z-index: 100;
+}
+.navbar-inner {
+  max-width: 800px; margin: 0 auto;
+  display: flex; align-items: center; height: 48px; gap: 12px;
+}
+.navbar-brand { font-weight: 700; font-size: 17px; margin-right: auto; }
+.navbar-user { font-size: 14px; color: #d1d5db; }
+#logoutBtn { background: #374151; color: #fff; border: 1px solid #4b5563; cursor: pointer; }
+#logoutBtn:hover { background: #4b5563; }
+
+/* ── Page Layout ── */
+.page { display: block; }
+.page-center {
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* ── Login Card ── */
+.login-card {
+  background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  padding: 40px 32px; width: 380px; max-width: 94vw;
+}
+.login-card h1 { font-size: 22px; text-align: center; margin-bottom: 4px; }
+.login-subtitle {
+  text-align: center; color: #6b7280; font-size: 14px; margin-bottom: 24px;
+}
+.login-hint {
+  text-align: center; color: #9ca3af; font-size: 12px; line-height: 1.8; margin-top: 4px;
+}
+.login-error {
+  background: #fff0f0; border: 1px solid #f87171; border-radius: 8px;
+  padding: 10px 14px; margin-top: 16px; color: #b91c1c; text-align: center; font-size: 14px;
+}
+
+/* ── Forms ── */
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #374151; }
+.form-group input {
+  width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+  font-size: 15px; outline: none; transition: border-color 0.2s;
+}
+.form-group input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 16px; font-size: 14px; border-radius: 8px; border: none;
+  cursor: pointer; transition: background 0.2s;
+}
+.btn-primary { background: #2563eb; color: #fff; }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-primary:disabled { background: #93b4f5; cursor: not-allowed; }
+.btn-sm { padding: 6px 12px; font-size: 13px; border-radius: 6px; }
+.btn-block { width: 100%; }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+
+/* ── Questions List ── */
+.questions-list { margin-top: 12px; }
+.q-card {
+  background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  padding: 16px 20px; margin-bottom: 12px; cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.15s;
+  border-left: 4px solid #3b82f6;
+}
+.q-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-1px); }
+.q-card-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+.q-card-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+.q-tag {
+  display: inline-block; font-size: 12px; padding: 2px 8px;
+  border-radius: 20px; background: #eff6ff; color: #1d4ed8;
+}
+
+/* ── Chat / Question Detail ── */
+.chat-layout { display: flex; flex-direction: column; gap: 12px; padding-bottom: 80px; }
+.chat-header {
+  display: flex; align-items: center; gap: 12px;
+  background: #fff; border-radius: 10px; padding: 12px 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.chat-header h2 { font-size: 16px; font-weight: 600; }
+
+.question-detail {
+  background: #fff; border-radius: 10px; padding: 16px 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.q-content { font-size: 16px; line-height: 1.7; margin-bottom: 12px; font-weight: 500; }
+.q-options { margin-bottom: 10px; }
+.q-opt-item {
+  padding: 8px 12px; margin-bottom: 4px; border-radius: 6px;
+  background: #f9fafb; font-size: 14px;
+}
+.q-opt-label { font-weight: 600; color: #4b5563; margin-right: 6px; }
+.q-meta { display: flex; gap: 8px; margin-bottom: 8px; }
+.q-type, .q-knowledge {
+  font-size: 12px; padding: 2px 8px; border-radius: 20px;
+  background: #f3f4f6; color: #6b7280;
+}
+.q-answer { margin-top: 8px; font-size: 14px; }
+.q-answer summary { cursor: pointer; color: #2563eb; font-weight: 500; margin-bottom: 6px; }
+.q-answer p { margin-bottom: 4px; }
+
+/* ── Chat Messages ── */
+.chat-messages { display: flex; flex-direction: column; gap: 12px; }
+.msg {
+  max-width: 80%; padding: 10px 14px; border-radius: 10px;
+  font-size: 14px; line-height: 1.6;
+}
+.msg-user {
+  align-self: flex-end; background: #2563eb; color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.msg-ai {
+  align-self: flex-start; background: #fff; color: #1f2328;
+  border: 1px solid #e5e7eb; border-bottom-left-radius: 4px;
+}
+.msg-system {
+  align-self: center; background: #f3f4f6; color: #6b7280;
+  font-size: 13px; border-radius: 6px;
+}
+.msg-loading {
+  align-self: flex-start; background: #fff; color: #9ca3af;
+  border: 1px dashed #d1d5db; border-bottom-left-radius: 4px;
+}
+
+/* ── Chat Input ── */
+.chat-input-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #fff; border-top: 1px solid #e5e7eb;
+  padding: 12px 16px; display: flex; gap: 8px;
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.04);
+}
+.chat-input-bar input {
+  flex: 1; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px;
+  font-size: 15px; outline: none;
+}
+.chat-input-bar input:focus { border-color: #3b82f6; }
+
+/* ── Responsive ── */
+@media (max-width: 600px) {
+  .login-card { width: 100%; border-radius: 0; box-shadow: none; }
+  .msg { max-width: 90%; }
+  .chat-header h2 { font-size: 14px; }
 }

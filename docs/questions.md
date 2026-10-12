@@ -64,11 +64,11 @@ id 必须是正的十进制整数。客户端先登录，再 GET 列表，点击
 
 ## 代码位置与集成点
 
-- `server/src/db.c`：旧表字段增量升级、幂等 seed、列表/详情的只读数据库查询。
-- `server/include/db.h`：查询接口和 OK / NOT_FOUND / ERROR 返回值；成功 JSON 由调用者 cJSON_free。
-- `server/src/routes.c`：严格匹配路由、有效会话校验、id 校验和 HTTP 状态映射。
+- `server/src/kv_store.c`：键值对存储层，namespace "qdata" 存储题目数据（content, options, answer, analysis, type, knowledge_points, status 等）。
+- `server/include/kv_store.h`：kv_store 查询接口和返回约定。
+- `server/src/routes.c`：严格匹配路由、有效会话校验、id 校验和 HTTP 状态映射，通过 `handle_questions` 调用 `kv_list_keys` / `kv_get_all` 组装列表与详情。
 - `server/include/routes.h`：更新路由说明，沿用现有 route_dispatch 签名。
-- 查询按请求创建并关闭 SQLite 连接，配置路径显式传入，没有新增共享可变状态。
+- `server/src/db.c`：启动时通过 `db_seed_questions` 将 5 道固定题 seed 到 kv_store。
 - 现有 auth 模块负责会话；本模块没有重写认证、前端或 AI 模块。
 
 ## 本地验证

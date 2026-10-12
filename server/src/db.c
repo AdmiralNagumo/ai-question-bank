@@ -13,6 +13,7 @@
 
 #include "cJSON.h"
 #include "db.h"
+#include "kv_store.h"
 
 /* ── SHA-256 工具 ── */
 
@@ -130,43 +131,12 @@ static int seed_demo_accounts(sqlite3 *db) {
     return 0;
 }
 
+/* ── 固定题目 seed（使用 kv_store） ── */
 
-/* ── 固定题目：兼容旧表的增量字段与幂等 seed ── */
-
-static int ensure_question_columns(sqlite3 *db) {
+int db_seed_questions(sqlite3 *db) {
     static const struct {
-        const char *name;
-        const char *sql;
-    } columns[] = {
-        {"options", "ALTER TABLE questions ADD COLUMN options TEXT NOT NULL DEFAULT '[]'"},
-        {"knowledge_points", "ALTER TABLE questions ADD COLUMN knowledge_points TEXT NOT NULL DEFAULT '[]'"},
-        {"question_type", "ALTER TABLE questions ADD COLUMN question_type TEXT NOT NULL DEFAULT 'short_answer'"},
-        {"seed_key", "ALTER TABLE questions ADD COLUMN seed_key TEXT"},
-    };
-    for (size_t i = 0; i < sizeof(columns) / sizeof(columns[0]); i++) {
-        sqlite3_stmt *stmt = NULL;
-        int rc = sqlite3_prepare_v2(db, "PRAGMA table_info(questions)", -1, &stmt, NULL);
-        if (rc != SQLITE_OK) return rc;
-        int found = 0;
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const char *name = (const char *)sqlite3_column_text(stmt, 1);
-            if (name != NULL && strcmp(name, columns[i].name) == 0) found = 1;
-        }
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) return rc;
-        if (!found) {
-            rc = sqlite3_exec(db, columns[i].sql, NULL, NULL, NULL);
-            if (rc != SQLITE_OK) return rc;
-        }
-    }
-    return sqlite3_exec(db,
-        "CREATE UNIQUE INDEX IF NOT EXISTS questions_seed_key_uq ON questions(seed_key)",
-        NULL, NULL, NULL);
-}
-
-static int seed_fixed_questions(sqlite3 *db) {
-    static const struct {
-        const char *key;
+        const char *key;         /* 数字 ID */
+        const char *seed_key;    /* 原始 seed_key（幂等检测用） */
         const char *content;
         const char *options;
         const char *answer;
@@ -174,78 +144,47 @@ static int seed_fixed_questions(sqlite3 *db) {
         const char *knowledge_points;
         const char *type;
     } questions[] = {
-        {"demo-linear-equation", "解方程：2x + 3 = 11，x 的值是多少？",
+        {"1", "demo-linear-equation", "解方程：2x + 3 = 11，x 的值是多少？",
          "[{\"label\":\"A\",\"text\":\"2\"},{\"label\":\"B\",\"text\":\"3\"},{\"label\":\"C\",\"text\":\"4\"},{\"label\":\"D\",\"text\":\"5\"}]",
          "C", "两边减去 3 得到 2x = 8，再除以 2，得到 x = 4。",
          "[\"一元一次方程\",\"等式性质\"]", "single_choice"},
-        {"demo-derivative", "求函数 f(x) = x^2 的导数。", "[]",
+        {"2", "demo-derivative", "求函数 f(x) = x^2 的导数。", "[]",
          "f'(x) = 2x", "由幂函数求导公式 (x^n)' = n*x^(n-1)，得到 f'(x) = 2x。",
          "[\"导数\",\"幂函数求导\"]", "short_answer"},
-        {"demo-limit", "当 x 趋近于 0 时，sin(x)/x 的极限是多少？（x 使用弧度制）",
+        {"3", "demo-limit", "当 x 趋近于 0 时，sin(x)/x 的极限是多少？（x 使用弧度制）",
          "[{\"label\":\"A\",\"text\":\"0\"},{\"label\":\"B\",\"text\":\"1\"},{\"label\":\"C\",\"text\":\"无穷大\"},{\"label\":\"D\",\"text\":\"不存在\"}]",
          "B", "这是重要极限：在弧度制下，lim(x→0) sin(x)/x = 1。",
          "[\"极限\",\"三角函数\"]", "single_choice"},
-        {"demo-newton-law", "质量为 2 kg 的物体，加速度为 3 m/s^2，所受合力是多少？",
+        {"4", "demo-newton-law", "质量为 2 kg 的物体，加速度为 3 m/s^2，所受合力是多少？",
          "[{\"label\":\"A\",\"text\":\"1.5 N\"},{\"label\":\"B\",\"text\":\"5 N\"},{\"label\":\"C\",\"text\":\"6 N\"},{\"label\":\"D\",\"text\":\"9 N\"}]",
          "C", "根据牛顿第二定律 F = ma，合力为 2 × 3 = 6 N。",
          "[\"牛顿第二定律\",\"力与运动\"]", "single_choice"},
-        {"demo-c-sizeof-char", "在 C 语言中，sizeof(char) 的值是多少？",
+        {"5", "demo-c-sizeof-char", "在 C 语言中，sizeof(char) 的值是多少？",
          "[{\"label\":\"A\",\"text\":\"1\"},{\"label\":\"B\",\"text\":\"2\"},{\"label\":\"C\",\"text\":\"4\"},{\"label\":\"D\",\"text\":\"由指针大小决定\"}]",
          "A", "C 标准规定 sizeof(char) 为 1；一个字节的位数由 CHAR_BIT 决定。",
          "[\"C 语言\",\"sizeof 运算符\",\"数据类型\"]", "single_choice"},
     };
+    int count = sizeof(questions) / sizeof(questions[0]);
 
-    /* Demo 题目由管理员持有；按用户名解析 id，避免假定用户 seed 顺序。 */
-    sqlite3_stmt *owner = NULL;
-    int rc = sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = 'admin'", -1,
-                                &owner, NULL);
-    if (rc != SQLITE_OK) return rc;
-    rc = sqlite3_step(owner);
-    if (rc != SQLITE_ROW) {
-        sqlite3_finalize(owner);
-        return rc == SQLITE_DONE ? SQLITE_CONSTRAINT : rc;
-    }
-    sqlite3_int64 owner_id = sqlite3_column_int64(owner, 0);
-    sqlite3_finalize(owner);
+    /* 使用 "qdata" namespace 避免与 db_init 创建的 questions 表冲突 */
+    char *check = kv_get(db, "qdata", "1", "content");
+    if (check != NULL) { free(check); return 0; }
 
-    const char *sql = "INSERT INTO questions "
-        "(seed_key, teacher_id, content, options, answer, analysis, knowledge_points, question_type) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(seed_key) DO NOTHING";
-    sqlite3_stmt *stmt = NULL;
-    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) return rc;
-    for (size_t i = 0; i < sizeof(questions) / sizeof(questions[0]); i++) {
-        if (sqlite3_bind_text(stmt, 1, questions[i].key, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_int64(stmt, 2, owner_id) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 3, questions[i].content, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 4, questions[i].options, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 5, questions[i].answer, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 6, questions[i].analysis, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 7, questions[i].knowledge_points, -1, SQLITE_STATIC) != SQLITE_OK ||
-            sqlite3_bind_text(stmt, 8, questions[i].type, -1, SQLITE_STATIC) != SQLITE_OK) {
-            rc = sqlite3_errcode(db);
-            break;
+    for (int i = 0; i < count; i++) {
+        if (kv_set(db, "qdata", questions[i].key, "content", questions[i].content) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "options", questions[i].options) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "answer", questions[i].answer) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "analysis", questions[i].analysis) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "type", questions[i].type) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "knowledge_points", questions[i].knowledge_points) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "seed_key", questions[i].seed_key) != 0 ||
+            kv_set(db, "qdata", questions[i].key, "teacher_id", "1") != 0 ||
+            kv_set(db, "qdata", questions[i].key, "status", "active") != 0) {
+            fprintf(stderr, "✘ 写入题目 '%s' 失败\n", questions[i].key);
+            return -1;
         }
-        rc = sqlite3_step(stmt);
-        if (rc != SQLITE_DONE) break;
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
     }
-    sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE ? SQLITE_OK : rc;
-}
-
-static int init_fixed_questions(sqlite3 *db) {
-    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    rc = ensure_question_columns(db);
-    if (rc == SQLITE_OK) rc = seed_fixed_questions(db);
-    if (rc == SQLITE_OK) rc = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "✘ 初始化固定题目失败: %s\n", sqlite3_errmsg(db));
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-    }
-    return rc;
+    return 0;
 }
 
 /* ── 公开 API ── */
@@ -303,9 +242,8 @@ int db_init(const char *path) {
         return rc;
     }
 
-    rc = init_fixed_questions(db);
     sqlite3_close(db);
-    return rc;
+    return 0;
 }
 
 char *db_query_user_by_username(const char *username) {
@@ -388,94 +326,3 @@ char *db_query_password_hash(const char *username) {
     return result;
 }
 
-/* ── 题目查询：请求独占连接，返回值显式区分不存在与内部错误 ── */
-
-static const char *question_text(sqlite3_stmt *stmt, int column) {
-    const char *text = (const char *)sqlite3_column_text(stmt, column);
-    return text != NULL ? text : "";
-}
-
-static cJSON *question_from_row(sqlite3_stmt *stmt) {
-    cJSON *obj = cJSON_CreateObject();
-    cJSON *options = cJSON_ParseWithOpts(question_text(stmt, 2), NULL, 1);
-    cJSON *points = cJSON_ParseWithOpts(question_text(stmt, 5), NULL, 1);
-    if (obj == NULL || !cJSON_IsArray(options) || !cJSON_IsArray(points)) goto fail;
-    if (cJSON_AddNumberToObject(obj, "id", (double)sqlite3_column_int64(stmt, 0)) == NULL ||
-        cJSON_AddStringToObject(obj, "content", question_text(stmt, 1)) == NULL ||
-        cJSON_AddStringToObject(obj, "answer", question_text(stmt, 3)) == NULL ||
-        cJSON_AddStringToObject(obj, "analysis", question_text(stmt, 4)) == NULL ||
-        cJSON_AddStringToObject(obj, "type", question_text(stmt, 6)) == NULL) goto fail;
-    if (!cJSON_AddItemToObject(obj, "options", options)) goto fail;
-    options = NULL; /* 所有权转交 obj */
-    if (!cJSON_AddItemToObject(obj, "knowledge_points", points)) goto fail;
-    points = NULL;
-    return obj;
-fail:
-    cJSON_Delete(options);
-    cJSON_Delete(points);
-    cJSON_Delete(obj);
-    return NULL;
-}
-
-static DbQuestionResult query_questions(const char *path, int list, int64_t id,
-                                        char **out_json) {
-    if (out_json == NULL) return DB_QUESTION_ERROR;
-    *out_json = NULL;
-    if (path == NULL) return DB_QUESTION_ERROR;
-
-    sqlite3 *db = NULL;
-    sqlite3_stmt *stmt = NULL;
-    cJSON *root = NULL;
-    DbQuestionResult result = DB_QUESTION_ERROR;
-    /* 读接口不创建空数据库；数据库丢失应是 500，不能伪装成空列表或 404。 */
-    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) goto done;
-    sqlite3_busy_timeout(db, 1000);
-    const char *sql = list
-        ? "SELECT id, content, options, answer, analysis, knowledge_points, question_type "
-          "FROM questions WHERE status = 'active' ORDER BY id"
-        : "SELECT id, content, options, answer, analysis, knowledge_points, question_type "
-          "FROM questions WHERE id = ? AND status = 'active'";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) goto done;
-    if (!list && sqlite3_bind_int64(stmt, 1, id) != SQLITE_OK) goto done;
-
-    root = cJSON_CreateObject();
-    if (root == NULL) goto done;
-    cJSON *items = NULL;
-    if (list) {
-        items = cJSON_AddArrayToObject(root, "questions");
-        if (items == NULL) goto done;
-    }
-    int rc;
-    int found = 0;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        cJSON *question = question_from_row(stmt);
-        if (question == NULL) goto done;
-        int added = list ? cJSON_AddItemToArray(items, question)
-                         : cJSON_AddItemToObject(root, "question", question);
-        if (!added) {
-            cJSON_Delete(question);
-            goto done;
-        }
-        found = 1;
-    }
-    if (rc != SQLITE_DONE) goto done;
-    if (!list && !found) {
-        result = DB_QUESTION_NOT_FOUND;
-        goto done;
-    }
-    *out_json = cJSON_PrintUnformatted(root);
-    if (*out_json != NULL) result = DB_QUESTION_OK;
-done:
-    cJSON_Delete(root);
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
-    return result;
-}
-
-DbQuestionResult db_list_questions(const char *path, char **out_json) {
-    return query_questions(path, 1, 0, out_json);
-}
-
-DbQuestionResult db_get_question(const char *path, int64_t id, char **out_json) {
-    return query_questions(path, 0, id, out_json);
-}

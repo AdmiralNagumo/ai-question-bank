@@ -10,7 +10,7 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11 -Iinclude -Ithird_party
 LDLIBS := -lmicrohttpd -lcurl -lsqlite3 -lpthread -lm -lcrypto
 
 BIN := ai-question-bank-server
-SRCS := src/main.c src/config.c src/db.c src/http_server.c src/routes.c src/ai_client.c src/auth.c third_party/cJSON.c
+SRCS := src/main.c src/config.c src/db.c src/http_server.c src/routes.c src/ai_client.c src/auth.c src/kv_store.c third_party/cJSON.c
 
 .PHONY: install lint test build run clean
 
