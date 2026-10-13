@@ -71,6 +71,16 @@ AI_MODEL=gpt-4o-mini
 
 固定题目列表与详情的字段约定、登录要求及回归用例见 [docs/questions.md](docs/questions.md)。
 
+## Pi Agent 后端
+
+C 主后端通过内部 HTTP 接口调用独立的 Node.js/TypeScript Pi 服务。
+支持异步解答、同题追问、取消任务和受限算术工具，默认可用 Mock 联调。
+
+- 启动与模型配置：[ai-service/README.md](ai-service/README.md)
+- 前端接口档案：[docs/pi-chat-api.md](docs/pi-chat-api.md)
+- OpenAPI：[docs/pi-chat-openapi.json](docs/pi-chat-openapi.json)
+- 可用客户端示例：[docs/examples/pi-chat-client.mjs](docs/examples/pi-chat-client.mjs)
+
 ## 协作规范
 
 - **分支模型**：`main` 为受保护分支，禁止直接推送；所有改动走 feature 分支 + Pull Request。

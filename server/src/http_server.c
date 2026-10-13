@@ -26,6 +26,8 @@ typedef struct {
     char *body;
     size_t len;
     size_t cap;
+    int too_large;
+    int responded;
 } RequestCtx;
 
 static RequestCtx *ctx_create(void) {
@@ -50,6 +52,9 @@ static void ctx_free(void *cls) {
 }
 
 static int ctx_append(RequestCtx *ctx, const char *data, size_t data_len) {
+    if (ctx->too_large || data_len > 65536U - ctx->len) {
+        ctx->too_large = 1; return 0;
+    }
     size_t needed = ctx->len + data_len + 1;
     if (needed > ctx->cap) {
         size_t new_cap = ctx->cap * 2;
@@ -63,6 +68,12 @@ static int ctx_append(RequestCtx *ctx, const char *data, size_t data_len) {
     ctx->len += data_len;
     ctx->body[ctx->len] = '\0';
     return 0;
+}
+
+static void request_completed(void *cls, struct MHD_Connection *conn, void **con_cls,
+                               enum MHD_RequestTerminationCode termination) {
+    (void)cls; (void)conn; (void)termination;
+    ctx_free(*con_cls); *con_cls = NULL;
 }
 
 /* ── libmicrohttpd 请求回调 ── */
@@ -102,12 +113,20 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *conn,
         return MHD_YES;
     }
 
-    /* 请求体接收完毕（upload_data_size == 0），执行路由分发 */
+    if (ctx->responded) return MHD_YES;
+    ctx->responded = 1;
+    if (ctx->too_large) {
+        const char *json = "{\"error\":\"请求内容过长\",\"code\":\"REQUEST_TOO_LARGE\"}";
+        struct MHD_Response *resp = MHD_create_response_from_buffer(strlen(json), (void *)json, MHD_RESPMEM_PERSISTENT);
+        if (resp == NULL) return MHD_NO;
+        MHD_add_response_header(resp, "Content-Type", "application/json; charset=utf-8");
+        enum MHD_Result ret = MHD_queue_response(conn, 413, resp);
+        MHD_destroy_response(resp); return ret;
+    }
+    /* 请求体接收完毕，分发一次；包括断开连接在内的所有清理由完成回调处理。 */
     enum MHD_Result ret = route_dispatch(conn, url, method,
                                          ctx->body, ctx->len,
                                          (const AppConfig *)cls);
-    ctx_free(ctx);
-    *con_cls = NULL;
     return ret;
 }
 
@@ -124,6 +143,7 @@ int http_server_start(const AppConfig *cfg) {
         MHD_USE_INTERNAL_POLLING_THREAD,
         (uint16_t)cfg->port, NULL, NULL,
         &request_handler, (void *)cfg,
+        MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
         MHD_OPTION_END);
     if (daemon == NULL) {
         fprintf(stderr, "✘ HTTP 服务启动失败（端口 %d 可能被占用）\n", cfg->port);

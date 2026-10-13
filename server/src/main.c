@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <curl/curl.h>
 #include <sqlite3.h>
 
 #include "config.h"
@@ -48,7 +49,11 @@ int main(void) {
 
     printf("✔ 数据库就绪: %s\n", cfg.db_path);
 
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+        sqlite3_close(cfg.db); return 1;
+    }
     int ret = http_server_start(&cfg);
+    curl_global_cleanup();
 
     sqlite3_close(cfg.db);
     return ret;
