@@ -93,41 +93,29 @@ static int seed_demo_accounts(sqlite3 *db) {
     };
     int count = sizeof(demos) / sizeof(demos[0]);
 
-    const char *sql = "INSERT OR IGNORE INTO users "
-                      "(username, name, role, password_hash) "
-                      "VALUES (?, ?, ?, ?)";
-
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "✘ 预编译 demo 插入语句失败: %s\n", sqlite3_errmsg(db));
-        return rc;
-    }
-
+    int next_id = 1;
     for (int i = 0; i < count; i++) {
+        char id_str[16];
+        snprintf(id_str, sizeof(id_str), "%d", next_id++);
+
         char *hash = hash_password(demos[i].pw, salt);
         if (hash == NULL) {
             fprintf(stderr, "✘ 密码哈希分配失败\n");
-            sqlite3_finalize(stmt);
             return -1;
         }
 
-        sqlite3_bind_text(stmt, 1, demos[i].username, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, demos[i].name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, demos[i].role, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 4, hash, -1, SQLITE_TRANSIENT);
-
-        rc = sqlite3_step(stmt);
-        if (rc != SQLITE_DONE) {
-            fprintf(stderr, "⚠ 插入 demo 账号 '%s' 失败: %s\n",
-                    demos[i].username, sqlite3_errmsg(db));
+        /* 通过 kv_store 存储 */
+        if (kv_set(db, "users", demos[i].username, "id", id_str) != 0 ||
+            kv_set(db, "users", demos[i].username, "name", demos[i].name) != 0 ||
+            kv_set(db, "users", demos[i].username, "role", demos[i].role) != 0 ||
+            kv_set(db, "users", demos[i].username, "password_hash", hash) != 0) {
+            fprintf(stderr, "✘ 写入 demo 账号 '%s' 失败\n", demos[i].username);
+            free(hash);
+            return -1;
         }
-
-        sqlite3_reset(stmt);
         free(hash);
     }
 
-    sqlite3_finalize(stmt);
     return 0;
 }
 
@@ -205,15 +193,6 @@ int db_init(const char *path) {
 
     /* 框架阶段基础表 */
     static const char *schema =
-        "CREATE TABLE IF NOT EXISTS users ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  role TEXT NOT NULL DEFAULT 'student',"
-        "  name TEXT NOT NULL,"
-        "  username TEXT NOT NULL UNIQUE,"
-        "  password_hash TEXT NOT NULL,"
-        "  status TEXT NOT NULL DEFAULT 'active',"
-        "  created_at TEXT NOT NULL DEFAULT (datetime('now'))"
-        ");"
         "CREATE TABLE IF NOT EXISTS questions ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  teacher_id INTEGER NOT NULL,"
@@ -234,95 +213,100 @@ int db_init(const char *path) {
         return rc;
     }
 
-    /* 插入演示账号 */
-    rc = seed_demo_accounts(db);
-    if (rc != 0) {
-        fprintf(stderr, "✘ 插入演示账号失败\n");
-        sqlite3_close(db);
-        return rc;
-    }
-
     sqlite3_close(db);
     return 0;
 }
 
-char *db_query_user_by_username(const char *username) {
-    if (username == NULL) return NULL;
+char *db_query_user_by_username(sqlite3 *db, const char *username) {
+    if (db == NULL || username == NULL) return NULL;
 
-    sqlite3 *db = NULL;
-    const char *path = getenv("DATABASE_PATH");
-    if (path == NULL) path = "data/ai_question_bank.db";
+    char *json = kv_get_all(db, "users", username);
+    if (json == NULL) return NULL;
 
-    if (sqlite3_open(path, &db) != SQLITE_OK) {
-        fprintf(stderr, "✘ 打开数据库失败（查询用户）: %s\n", sqlite3_errmsg(db));
-        sqlite3_close(db);
+    cJSON *arr = cJSON_Parse(json);
+    free(json);
+    if (arr == NULL || !cJSON_IsArray(arr)) {
+        cJSON_Delete(arr);
         return NULL;
     }
 
-    const char *sql = "SELECT id, username, name, role FROM users "
-                      "WHERE username = ? AND status = 'active' LIMIT 1";
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr, "✘ 预编译查询用户语句失败\n");
-        sqlite3_close(db);
-        return NULL;
+    int user_id   = 0;
+    char *uname   = NULL;
+    char *name    = NULL;
+    char *role    = NULL;
+
+    int size = cJSON_GetArraySize(arr);
+    for (int i = 0; i < size; i++) {
+        cJSON *item = cJSON_GetArrayItem(arr, i);
+        cJSON *vn   = cJSON_GetObjectItem(item, "name");
+        cJSON *vv   = cJSON_GetObjectItem(item, "value");
+        if (vn == NULL || vv == NULL || !cJSON_IsString(vn) || !cJSON_IsString(vv))
+            continue;
+        const char *n = vn->valuestring;
+        const char *v = vv->valuestring;
+        if (strcmp(n, "id") == 0)
+            user_id = atoi(v);
+        else if (strcmp(n, "username") == 0)
+            uname = strdup(v);
+        else if (strcmp(n, "name") == 0)
+            name = strdup(v);
+        else if (strcmp(n, "role") == 0)
+            role = strdup(v);
     }
+    cJSON_Delete(arr);
 
-    sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "id", user_id);
+    cJSON_AddStringToObject(obj, "username", uname ? uname : (username ? username : ""));
+    cJSON_AddStringToObject(obj, "name", name ? name : (uname ? uname : (username ? username : "")));
+    cJSON_AddStringToObject(obj, "role", role ? role : "student");
+    char *result = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
 
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        int id          = sqlite3_column_int(stmt, 0);
-        const char *u   = (const char *)sqlite3_column_text(stmt, 1);
-        const char *n   = (const char *)sqlite3_column_text(stmt, 2);
-        const char *r   = (const char *)sqlite3_column_text(stmt, 3);
-
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(obj, "id", id);
-        cJSON_AddStringToObject(obj, "username", u ? u : "");
-        cJSON_AddStringToObject(obj, "name", n ? n : "");
-        cJSON_AddStringToObject(obj, "role", r ? r : "");
-        result = cJSON_PrintUnformatted(obj);
-        cJSON_Delete(obj);
-    }
-
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
+    free(uname);
+    free(name);
+    free(role);
     return result;
 }
 
-char *db_query_password_hash(const char *username) {
-    if (username == NULL) return NULL;
+char *db_query_password_hash(sqlite3 *db, const char *username) {
+    if (db == NULL || username == NULL) return NULL;
+    return kv_get(db, "users", username, "password_hash");
+}
 
-    sqlite3 *db = NULL;
-    const char *path = getenv("DATABASE_PATH");
-    if (path == NULL) path = "data/ai_question_bank.db";
+int db_create_user(sqlite3 *db, const char *username,
+                   const char *password_hash, const char *role) {
+    if (db == NULL || username == NULL || password_hash == NULL) return -1;
+    if (role == NULL) role = "student";
 
-    if (sqlite3_open(path, &db) != SQLITE_OK) {
-        fprintf(stderr, "✘ 打开数据库失败（查询密码）: %s\n", sqlite3_errmsg(db));
-        sqlite3_close(db);
-        return NULL;
+    /* kv_set 会自动创建 namespace 表，先检查用户名是否已存在 */
+    char *existing = kv_get(db, "users", username, "password_hash");
+    if (existing != NULL) {
+        free(existing);
+        return 1;  /* 用户名已存在 */
     }
 
-    const char *sql = "SELECT password_hash FROM users "
-                      "WHERE username = ? AND status = 'active' LIMIT 1";
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr, "✘ 预编译查询密码语句失败\n");
-        sqlite3_close(db);
-        return NULL;
+    /* 用 kv_list_keys 统计已有用户数来生成 id */
+    int count = 0;
+    char **keys = kv_list_keys(db, "users", &count);
+    int next_id = count + 1;
+    kv_free_str_array(keys);
+
+    char id_str[16];
+    snprintf(id_str, sizeof(id_str), "%d", next_id);
+
+    if (kv_set(db, "users", username, "id", id_str) != 0 ||
+        kv_set(db, "users", username, "username", username) != 0 ||
+        kv_set(db, "users", username, "name", username) != 0 ||
+        kv_set(db, "users", username, "role", role) != 0 ||
+        kv_set(db, "users", username, "password_hash", password_hash) != 0) {
+        return -1;
     }
 
-    sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC);
+    return 0;
+}
 
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *hash = (const char *)sqlite3_column_text(stmt, 0);
-        if (hash) result = strdup(hash);
-    }
-
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
-    return result;
+int db_seed_users(sqlite3 *db) {
+    return seed_demo_accounts(db);
 }
 

@@ -38,6 +38,14 @@ int main(void) {
         return 1;
     }
 
+    /* seed demo 账号（通过 kv_store） */
+    rc = db_seed_users(cfg.db);
+    if (rc != 0) {
+        fprintf(stderr, "✘ demo 账号 seed 失败\n");
+        sqlite3_close(cfg.db);
+        return 1;
+    }
+
     printf("✔ 数据库就绪: %s\n", cfg.db_path);
 
     int ret = http_server_start(&cfg);

@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include <microhttpd.h>
 
@@ -86,6 +87,161 @@ static enum MHD_Result reply_error(struct MHD_Connection *conn, unsigned int cod
 
 /* ── 路由处理器 ── */
 
+/* 检查密码强度：至少 8 位，包含字母和数字 */
+static int validate_password(const char *pw) {
+    if (pw == NULL) return 0;
+    size_t len = strlen(pw);
+    if (len < 8) return 0;
+    int has_letter = 0, has_digit = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (isalpha((unsigned char)pw[i])) has_letter = 1;
+        if (isdigit((unsigned char)pw[i])) has_digit = 1;
+    }
+    return has_letter && has_digit;
+}
+
+/* POST /api/v1/auth/register */
+static enum MHD_Result handle_register(struct MHD_Connection *conn,
+                                       const char *body, size_t body_len,
+                                       const AppConfig *cfg) {
+    (void)body_len;
+    if (body == NULL || body[0] == '\0')
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "请求体为空");
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL)
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "JSON 解析失败");
+
+    char *username = json_get_string(root, "username");
+    char *password = json_get_string(root, "password");
+    char *confirm  = json_get_string(root, "confirm_password");
+    char *req_role = json_get_string(root, "role");  /* 可选 */
+    cJSON_Delete(root);
+
+    if (username == NULL || password == NULL || confirm == NULL) {
+        free(username);
+        free(password);
+        free(confirm);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                           "缺少 username、password 或 confirm_password");
+    }
+
+    /* 检查用户名是否为空白 */
+    if (strlen(username) == 0) {
+        free(username);
+        free(password);
+        free(confirm);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "用户名不能为空");
+    }
+
+    /* 检查两次密码一致 */
+    if (strcmp(password, confirm) != 0) {
+        free(username);
+        free(password);
+        free(confirm);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "两次输入的密码不一致");
+    }
+
+    /* 检查密码强度 */
+    if (!validate_password(password)) {
+        free(username);
+        free(password);
+        free(confirm);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                           "密码至少 8 位，且必须包含字母和数字");
+    }
+
+    /* 检查角色是否合法 */
+    if (req_role != NULL &&
+        strcmp(req_role, "student") != 0 &&
+        strcmp(req_role, "teacher") != 0 &&
+        strcmp(req_role, "admin") != 0) {
+        free(username);
+        free(password);
+        free(confirm);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                           "角色值无效，仅支持 student/teacher/admin");
+    }
+
+    /* 哈希密码（与 login 使用相同 salt） */
+    const char *salt = "ai-question-bank-demo-salt-2026";
+    char *hash = hash_password(password, salt);
+    free(password);
+    free(confirm);
+    if (hash == NULL) {
+        free(username);
+        free(req_role);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "服务器内部错误");
+    }
+
+    int ret = db_create_user(cfg->db, username, hash, req_role);
+    free(hash);
+    free(req_role);
+
+    if (ret == 1) {
+        free(username);
+        return reply_error(conn, MHD_HTTP_CONFLICT, "用户名已存在");
+    }
+    if (ret != 0) {
+        free(username);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "注册失败，请稍后重试");
+    }
+
+    /* 注册成功后自动登录，为其创建 session */
+    char *user_json = db_query_user_by_username(cfg->db, username);
+    if (user_json == NULL) {
+        free(username);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "注册成功但查询用户失败");
+    }
+
+    cJSON *u_root = cJSON_Parse(user_json);
+    int    user_id = 0;
+    char  *db_role = NULL;
+    char  *db_name = NULL;
+    if (u_root) {
+        cJSON *id_item = cJSON_GetObjectItem(u_root, "id");
+        if (id_item && cJSON_IsNumber(id_item)) user_id = id_item->valueint;
+        db_role = json_get_string(u_root, "role");
+        db_name = json_get_string(u_root, "name");
+    }
+
+    const char *token = session_create(user_id, db_role ? db_role : "student",
+                                       db_name ? db_name : username);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON *user_obj = cJSON_CreateObject();
+    if (token && resp && user_obj) {
+        cJSON_AddStringToObject(resp, "token", token);
+        cJSON_AddNumberToObject(user_obj, "id", user_id);
+        cJSON_AddStringToObject(user_obj, "username", username);
+        cJSON_AddStringToObject(user_obj, "name", db_name ? db_name : username);
+        cJSON_AddStringToObject(user_obj, "role", db_role ? db_role : "student");
+        cJSON_AddItemToObject(resp, "user", user_obj);
+
+        char *out = cJSON_PrintUnformatted(resp);
+        enum MHD_Result result = reply_json(conn, MHD_HTTP_CREATED, out);
+        cJSON_free(out);
+        cJSON_Delete(resp);
+        free(user_json);
+        free(username);
+        free(db_role);
+        free(db_name);
+        return result;
+    }
+
+    cJSON_Delete(resp);
+    free(user_json);
+    free(username);
+    free(db_role);
+    free(db_name);
+    return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "创建会话失败");
+}
+
 /* GET /api/v1/health */
 static enum MHD_Result handle_health(struct MHD_Connection *conn) {
     cJSON *root = cJSON_CreateObject();
@@ -103,7 +259,8 @@ static enum MHD_Result handle_health(struct MHD_Connection *conn) {
 
 /* POST /api/v1/auth/login */
 static enum MHD_Result handle_login(struct MHD_Connection *conn,
-                                    const char *body, size_t body_len) {
+                                    const char *body, size_t body_len,
+                                    const AppConfig *cfg) {
     (void)body_len;
     if (body == NULL || body[0] == '\0')
         return reply_error(conn, MHD_HTTP_BAD_REQUEST, "请求体为空");
@@ -124,7 +281,7 @@ static enum MHD_Result handle_login(struct MHD_Connection *conn,
     }
 
     /* 查询数据库中存储的 password_hash */
-    char *stored_hash = db_query_password_hash(username);
+    char *stored_hash = db_query_password_hash(cfg->db, username);
     if (stored_hash == NULL) {
         free(username);
         free(password);
@@ -147,7 +304,7 @@ static enum MHD_Result handle_login(struct MHD_Connection *conn,
     }
 
     /* 查询用户信息用于创建 session */
-    char *user_json = db_query_user_by_username(username);
+    char *user_json = db_query_user_by_username(cfg->db, username);
     if (user_json == NULL) {
         free(username);
         free(password);
@@ -450,7 +607,13 @@ enum MHD_Result route_dispatch(struct MHD_Connection *conn, const char *url,
     /* POST /api/v1/auth/login */
     if (strcmp(method, "POST") == 0 &&
         strcmp(url, "/api/v1/auth/login") == 0) {
-        return handle_login(conn, body, body_len);
+        return handle_login(conn, body, body_len, cfg);
+    }
+
+    /* POST /api/v1/auth/register */
+    if (strcmp(method, "POST") == 0 &&
+        strcmp(url, "/api/v1/auth/register") == 0) {
+        return handle_register(conn, body, body_len, cfg);
     }
 
     /* POST /api/v1/auth/logout */

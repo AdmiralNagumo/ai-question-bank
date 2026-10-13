@@ -13,12 +13,21 @@ int db_init(const char *path);
  * 返回 0 成功；非 0 失败。 */
 int db_seed_questions(sqlite3 *db);
 
+/* 将 demo 账号 seed 写入 kv_store 存储（在 kv_init 之后调用）。 */
+int db_seed_users(sqlite3 *db);
+
 /* 按用户名查询用户，返回 json 字符串（如 {"id":1,"role":"admin","name":"管理员"}），
  * 调用者负责 free()。查不到返回 NULL。 */
-char *db_query_user_by_username(const char *username);
+char *db_query_user_by_username(sqlite3 *db, const char *username);
 
 /* 按用户名查询密码 hash，返回 hash 字符串，调用者负责 free()。
  * 查不到返回 NULL。 */
-char *db_query_password_hash(const char *username);
+char *db_query_password_hash(sqlite3 *db, const char *username);
+
+/* 创建新用户，name 默认同 username。
+ * role 为 NULL 时默认使用 "student"。
+ * 返回 0 成功；1 用户名已存在；-1 其他错误。 */
+int db_create_user(sqlite3 *db, const char *username,
+                   const char *password_hash, const char *role);
 
 #endif /* AIQB_DB_H */

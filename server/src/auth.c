@@ -11,6 +11,41 @@
 /* ── 内存 Session 存储（固定数组，单线程 demo 够用） ── */
 static Session g_sessions[MAX_SESSIONS];
 static int g_session_count = 0;
+static int g_create_counter = 0;       /* 用于控制定期清理的频率 */
+
+/* 每调用 session_create 多少次后触发一次定期清理 */
+#define SESSION_CLEANUP_INTERVAL 16
+
+/* 扫描并压缩 session 数组：移除所有失效条目（active=false 或已过期），
+ * 将有效条目连续排列在数组头部，更新 g_session_count。
+ * 单线程环境，不加锁。 */
+static void session_cleanup(void) {
+    time_t now = time(NULL);
+    int write_idx = 0;
+
+    for (int read_idx = 0; read_idx < g_session_count; read_idx++) {
+        Session *s = &g_sessions[read_idx];
+
+        /* 检查是否过期（过期也视为失效） */
+        if (s->active && s->expires_at <= now) {
+            s->active = false;
+        }
+
+        if (s->active) {
+            if (write_idx != read_idx) {
+                g_sessions[write_idx] = g_sessions[read_idx];
+            }
+            write_idx++;
+        }
+    }
+
+    /* 将新释放的槽位清零（可选，防残留数据干扰） */
+    for (int i = write_idx; i < g_session_count; i++) {
+        memset(&g_sessions[i], 0, sizeof(Session));
+    }
+
+    g_session_count = write_idx;
+}
 
 /* 生成随机十六进制 token（用 rand()，demo 够用） */
 static void generate_token(char *buf, size_t len) {
@@ -22,7 +57,17 @@ static void generate_token(char *buf, size_t len) {
 }
 
 const char *session_create(int user_id, const char *role, const char *name) {
-    if (g_session_count >= MAX_SESSIONS) return NULL;
+    /* 定期清理：每 SESSION_CLEANUP_INTERVAL 次创建触发一次压缩，避免槽位被僵尸 session 耗尽 */
+    g_create_counter++;
+    if (g_create_counter % SESSION_CLEANUP_INTERVAL == 0) {
+        session_cleanup();
+    }
+
+    /* 槽位仍不够则强制清理一次；若清理后仍不足才真正失败 */
+    if (g_session_count >= MAX_SESSIONS) {
+        session_cleanup();
+        if (g_session_count >= MAX_SESSIONS) return NULL;
+    }
 
     Session *s = &g_sessions[g_session_count];
     generate_token(s->token, sizeof(s->token));
