@@ -85,7 +85,7 @@ export class Jobs {
       teaching.hintLevel = Math.min(3, 1 + conversation.messages.filter(message => message.role === 'user').length);
     }
     const job: Job = { id: randomUUID(), owner: request.user_id, request, conversation,
-                       teaching, status: 'queued', created: Date.now() };
+                       teaching, status: 'queued', created: performance.now() };
     conversation.activeJob = job.id;
     conversation.touched = Date.now();
     this.jobs.set(job.id, job);
@@ -134,7 +134,7 @@ export class Jobs {
   }
   private async execute(job: Job) {
     try {
-      const remaining = this.config.timeoutMs - (Date.now() - job.created);
+      const remaining = Math.floor(this.config.timeoutMs - (performance.now() - job.created));
       if (remaining <= 0) throw new ApiError(504, 'AI_TIMEOUT', '解答超时，请稍后重试');
       job.run = startAgent({ ...this.config, timeoutMs: remaining }, job.request, job.conversation.messages, job.teaching);
       const result = await job.run.completion;

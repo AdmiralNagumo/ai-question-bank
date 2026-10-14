@@ -10,6 +10,7 @@ import { parseSubmission } from '../src/contracts.js';
 import { solveLinear, verifyLinear } from '../src/math-tools.js';
 import { teachingInstructions } from '../src/teaching.js';
 import { loadFixtures } from '../src/evaluate.js';
+import { answerOnlyFeedback } from '../src/answer-review.js';
 
 const serviceToken = 'test-only-service-token-1234567890';
 const question = { id: 1, content: '质量为 2 kg、加速度为 3 m/s^2，合力是多少？',
@@ -200,7 +201,8 @@ test('real Pi provider path executes arithmetic then returns the model answer', 
     assert.deepEqual(body.tools.map((tool: any) => tool.function.name),
       ['arithmetic', 'solve_linear_equation', 'verify_linear_solution']);
     if (calls === 1) {
-      stream(response, { role: 'assistant', tool_calls: [{ index: 0, id: 'calc_1', type: 'function',
+      stream(response, { role: 'assistant', content: '先使用牛顿第二定律 F=ma，再计算质量与加速度的乘积。',
+        reasoning_content: 'PRIVATE_HIDDEN_REASONING', tool_calls: [{ index: 0, id: 'calc_1', type: 'function',
         function: { name: 'arithmetic', arguments: JSON.stringify({ operation: 'multiply', a: 2, b: 3 }) } }] }, 'tool_calls');
     } else {
       assert(body.messages.some((message: any) => message.role === 'tool' && message.content === '6'));
@@ -212,6 +214,8 @@ test('real Pi provider path executes arithmetic then returns the model answer', 
       const completed = await finish(base, created.body.job_id);
       assert.equal(completed.status, 'succeeded');
       assert.match(completed.reply, /6 N/);
+      assert.match(completed.reply, /先使用牛顿第二定律/);
+      assert(!completed.reply.includes('PRIVATE_HIDDEN_REASONING'));
       assert.equal(completed.usage.model_calls, 2);
       assert.equal(completed.usage.tool_calls, 1);
       assert.equal(completed.usage.input_tokens, 20);
@@ -346,6 +350,42 @@ test('evaluation fixtures include all modes and valid student data; rubric never
       ...(value.student_answer !== undefined ? { student_answer: value.student_answer } : {}) });
     assert.equal('rubric' in parsed, false);
   }
+});
+
+test('answer-only feedback verifies a candidate without inventing process or accepting unsupported equations', () => {
+  const simple = { ...submission, question: { ...question, content: '求解 2x+3=11。' }, student_answer: 'x=7。' };
+  assert.match(answerOnlyFeedback(simple)!, /17/);
+  assert.match(answerOnlyFeedback(simple)!, /无法确定具体错因/);
+  assert.match(answerOnlyFeedback({ ...simple, student_answer: 'x=4。' })!, /数值容差内成立/);
+  assert.match(answerOnlyFeedback({ ...simple, question: { ...question, content: 'x≠1，求解2x+3=5。' }, student_answer: 'x=1' })!, /其他限制仍需检查/);
+  for (const content of ['x^2+2x+3=11', 'x/3+2=4', '2x+3=11且x=4', '根据图求解']) {
+    assert.equal(answerOnlyFeedback({ ...simple, question: { ...question, content } }), undefined);
+  }
+  assert.equal(answerOnlyFeedback({ ...simple, student_answer: '2x=14，所以x=7' }), undefined);
+});
+
+test('unreliable answer-only explanations cannot reach the response or follow-up history', async () => {
+  let calls = 0;
+  await upstream((body, response) => {
+    calls++;
+    if (calls > 1) assert(!JSON.stringify(body.messages).includes('GUESSED_PROCESS'));
+    stream(response, { role: 'assistant', content: calls === 1 ? 'GUESSED_PROCESS: 你先算11-3=7所以漏了除法。' : '本轮提供的过程正确。' });
+  }, async modelBase => {
+    await usingApp(config({ mock: false, baseUrl: modelBase + '/v1', model: 'test-model', apiKey: 'test-provider-key' }), async base => {
+      const first = await request(base, '/internal/v1/jobs', 'POST', { ...submission, mode: 'review',
+        question: { ...question, content: '求解2x+3=11。' }, student_answer: 'x=7。',
+      });
+      const result = await finish(base, first.body.job_id);
+      assert.equal(result.status, 'succeeded'); assert.match(result.reply, /无法确定具体错因/);
+      assert(!result.reply.includes('GUESSED_PROCESS'));
+      const next = await request(base, '/internal/v1/jobs', 'POST', { ...submission,
+        question: { ...question, content: '求解2x+3=11。' }, conversation_id: result.conversation_id,
+        student_answer: '2x=8，两边除以2，所以x=4。',
+      });
+      assert.equal((await finish(base, next.body.job_id)).status, 'succeeded');
+    });
+  });
+  assert.equal(calls, 2);
 });
 
 test('model errors are sanitized; provider 429 is not a user login failure', async () => {

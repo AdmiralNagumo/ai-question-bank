@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/service.test.js",
     "eval": "npm run build && node dist/src/evaluate.js",
+    "eval:real": "npm run build && node --env-file-if-exists=.env dist/src/evaluate.js --real",
     "start": "node --env-file-if-exists=.env dist/src/server.js"
   },
   "dependencies": {

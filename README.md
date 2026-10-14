@@ -78,6 +78,7 @@ C 主后端通过内部 HTTP 接口调用独立的 Node.js/TypeScript Pi 服务�
 提供受限算术、一元一次方程求解/代入校验工具和30个解题评测案例。
 
 - 启动与模型配置：[ai-service/README.md](ai-service/README.md)
+- V4.1-Flash真实模型阶段验证：[docs/pi-chat-evaluation.md](docs/pi-chat-evaluation.md)
 - 前端接口档案：[docs/pi-chat-api.md](docs/pi-chat-api.md)
 - OpenAPI：[docs/pi-chat-openapi.json](docs/pi-chat-openapi.json)
 - 可用客户端示例：[docs/examples/pi-chat-client.mjs](docs/examples/pi-chat-client.mjs)

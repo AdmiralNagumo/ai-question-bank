@@ -116,7 +116,7 @@ HTTP 200 表示查询成功。**必须再检查响应中的 status**：
 }
 ```
 
-reply 是需要安全渲染的文本，可以包含 Markdown 和公式。先用 textContent 展示，
+reply 包含本轮工具调用前后的教学文字，不包含内部思考或往轮回复；它是需要安全渲染的文本，可以包含 Markdown 和公式。先用 textContent 展示，
 如转换为 HTML，应使用安全的渲染与过滤流程。model 为 `mock` 时显示“后端 Mock 模式”提示。
 usage 是整个任务中模型调用的累计 token 数和调用次数，不代表价格；Mock 模式 token 数可以为 0。
 input_tokens 包含供应商返回的普通输入、缓存读取和缓存写入 token。
@@ -247,6 +247,9 @@ addMessage('ai', result.reply);
 ```
 
 review 追问可以省略 mode，仍需传 student_answer（前端保留作答输入框内容即可）。仅有最终答案时后端会指导模型检查答案，不能声称找到了学生未提供的中间错误。
+
+对于可识别的单个数值候选和显式一元一次方程，后端会使用确定性代入反馈，请求学生补充过程；
+其他题型仍由模型处理。前端按同一reply文本字段展示，不需要另接工具接口。
 
 所有任务状态都增加 mode；仅 hint 增加 hint_level。旧调用不传新字段仍按 solve 工作，异步状态流程保持一致。
 

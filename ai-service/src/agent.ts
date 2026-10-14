@@ -7,6 +7,7 @@ import type { Config } from './config.js';
 import { ApiError, type Submission } from './contracts.js';
 import { teachingInstructions, type TeachingContext } from './teaching.js';
 import { linearSolver, linearVerifier } from './math-tools.js';
+import { answerOnlyFeedback } from './answer-review.js';
 
 const calculatorParameters = Type.Object({
   operation: Type.Union(['add', 'subtract', 'multiply', 'divide', 'power'].map(value => Type.Literal(value))),
@@ -70,6 +71,7 @@ export function startAgent(config: Config, request: Submission, history: AgentMe
   let toolCalls = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  const visibleSteps: string[] = [];
   let lastStatus = 0;
   let limited = false;
   let timedOut = false;
@@ -108,6 +110,8 @@ export function startAgent(config: Config, request: Submission, history: AgentMe
     if (event.type === 'turn_end' && event.message.role === 'assistant') {
       inputTokens += event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
       outputTokens += event.message.usage.output;
+      const text = event.message.content.filter(item => item.type === 'text').map(item => item.text).join('\n').trim();
+      if (text) visibleSteps.push(text); // 保留本轮工具调用前后的教学文字；不收集thinking或历史轮次。
     }
   });
   const completion = (async (): Promise<Completion> => {
@@ -123,10 +127,21 @@ export function startAgent(config: Config, request: Submission, history: AgentMe
         throw new ApiError(502, 'AI_UPSTREAM_ERROR', '模型服务暂时不可用');
       }
       if (last.stopReason === 'length') throw new ApiError(502, 'AI_OUTPUT_LIMIT', '解答超过输出长度限制');
-      const reply = last.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-      if (!reply.trim()) throw new ApiError(502, 'AI_INVALID_RESPONSE', '模型未返回可用解答');
+      const finalText = last.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+      if (!finalText.trim()) throw new ApiError(502, 'AI_INVALID_RESPONSE', '模型未返回可用解答');
+      const checkedAnswer = teaching.mode === 'review' ? answerOnlyFeedback(request) : undefined;
+      const reply = checkedAnswer ?? visibleSteps.join('\n\n');
+      const messages = structuredClone(agent.state.messages);
+      if (checkedAnswer) {
+        // 工具调用对保持完整；当前轮次不可靠的文字不进入后续追问历史。
+        for (const message of messages.slice(history.length)) {
+          if (message.role === 'assistant') message.content = message.content.filter(item => item.type === 'toolCall');
+        }
+        const final = messages.findLast(message => message.role === 'assistant') as AssistantMessage;
+        final.content.push({ type: 'text', text: reply });
+      }
       return { reply, model: config.mock ? 'mock' : config.model,
-               messages: structuredClone(agent.state.messages),
+               messages,
                usage: { input_tokens: inputTokens, output_tokens: outputTokens,
                         model_calls: modelCalls, tool_calls: toolCalls } };
     } catch (error) {

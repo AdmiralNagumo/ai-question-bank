@@ -79,6 +79,11 @@ Skill 是模型的教学指导，提示不泄露答案、错误定位准确等�
 零系数单独检查常数等式。模型负责从题干整理系数，工具不核验题干、定义域、单位或复杂符号表达式。
 API 的 succeeded 只表示任务成功结束，不能理解为答案已被证明正确。
 
+对于student_answer仅含数值候选（如x=7）且题干可识别为单个显式ax+b=c的情况，
+`src/answer-review.ts`按题干系数确定性代入，最终反馈只说明等式是否成立并请求补充过程。
+这类结果覆盖模型中无依据的错因猜测；对应文字也替换当前轮次的助手历史，不影响完整工具调用对。
+该处理不读取题库标准答案，不保证识别复杂表达式，也不把满足等式当成满足全部定义域条件。
+
 ## 解题评测
 
 `eval/fixtures.json` 包含30个案例（每模式10个），覆盖负数/小数方程、无解/多解、定义域、应用题、
@@ -92,7 +97,16 @@ cd ai-service
 make eval
 ```
 
-真实模型评测会串行提交30个案例并产生调用费用；显式启用后运行（模型配置从环境变量读取，评测不自动加载 .env）：
+真实模型评测会串行提交30个案例并产生调用费用；将模型地址、名称和 Key 填入本地 `.env` 后显式运行：
+
+```bash
+make eval-real
+```
+
+本次使用官方 DeepSeek V4.1-Flash：`AI_API_BASE_URL=https://api.deepseek.com`、`AI_MODEL=deepseek-flash`。
+`eval-real` 会读取 `.env`，普通 `make eval` 默认仅检查题集。Key 不会进入报告或提交。
+
+也可完全通过环境变量配置（普通 eval 不自动加载 .env）：
 
 ```bash
 export AI_API_BASE_URL=https://api.deepseek.com
@@ -103,9 +117,30 @@ AI_EVAL_REAL=1 make eval
 unset AI_API_KEY
 ```
 
-报告保存在被 Git 忽略的 `eval/reports/`。每题包含回复、耗时、累计使用量和待填写的 human_review。
+报告保存在被 Git 忽略的 `eval/reports/`，每题完成后立即保存。每题包含回复、单调时钟耗时、累计使用量和待填写的 human_review。
+报告记录模型、地址以及题集/Agent/技能/工具/队列代码的哈希。恢复评测必须使用相同代码和模型，避免混合不同版本结果。
+
+只评测指定案例，或恢复未完成报告（文件名从命令输出获得）：
+
+```bash
+npm run eval:real -- --cases solve-01,review-24
+npm run eval:real -- --resume evaluation-时间戳.json
+```
+
+恢复时跳过已记录案例，不自动重复付费调用。认证、供应商异常或限流会保存进度并停止后续题目；
+修改配置/代码后应新建报告重新验证。完成30题只表示请求完成，assessed仍需逐题核对。
 将正确性、教学清晰度、模式遵循分别记0/1，失败任务记0；同一评测集比较模型或技能修改前后表现。
-报告默认标注 `assessed:false`，人工评分后自行标为 true。默认检查、CI与Mock均不能证明真实解题准确率。
+报告默认标注 `assessed:false`；评分时注明实际评审人或工具，Codex核对不能标成真人评分。
+默认检查、CI与Mock均不能证明真实解题准确率；阶段二报告另见 `docs/pi-chat-evaluation.md`。
+
+真实C接口学习流程检查（会启动临时服务、使用临时数据库并调用真实模型）：
+
+```bash
+python3 ai-service/eval/verify_learning_flow.py --real
+```
+
+在仓库根目录执行。覆盖三级提示与模式越权请求、仅答案反馈、修正过程追问和新建讲解对话。
+测试结束后关闭自己启动的服务；默认不带--real只显示说明，不调用模型。
 
 ## 验证
 
