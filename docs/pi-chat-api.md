@@ -1,6 +1,6 @@
 # Pi Agent 前端接口档案
 
-版本：1.0；日期：2026-10-13。适用于 C 主后端＋独立 Pi AI 服务。
+版本：1.1；日期：2026-10-14。适用于 C 主后端＋独立 Pi AI 服务。
 
 前端只调用 **C 后端的 `/api/v1/*`**。本机默认地址为 `http://localhost:8000`；
 其他机器联调时由后端负责人提供实际地址。Pi 内部端口、模型密钥和服务凭证不发送给前端。
@@ -57,7 +57,9 @@ POST /api/v1/chat
 | --- | --- | --- | --- |
 | question_id | integer | 是 | 1–2147483647，必须是已有且可用的题目 |
 | message | string | 是 | 1–4000 个 Unicode 字符，不允许全空白或 NUL |
-| conversation_id | string | 否 | 后端返回的 UUID；限定同用户、同题目 |
+| conversation_id | string | 否 | 后端返回的 UUID；限定同用户、同题目、同教学模式 |
+| mode | string | 否 | solve / hint / review；新对话默认 solve，追问省略时继承 |
+| student_answer | string | review 每轮必填 | 1–4000 个 Unicode 字符，非空白，无 NUL；其他模式不接受 |
 
 不发送 user_id、模型、API Key、系统提示、工具配置或自定义 history。
 未知字段、重复 JSON 字段及非法字段类型返回 400；请求体最大 64 KiB。
@@ -69,6 +71,7 @@ POST /api/v1/chat
   "job_id": "11111111-1111-4111-8111-111111111111",
   "conversation_id": "22222222-2222-4222-8222-222222222222",
   "question_id": 1,
+  "mode": "solve",
   "status": "queued"
 }
 ```
@@ -100,6 +103,7 @@ HTTP 200 表示查询成功。**必须再检查响应中的 status**：
   "job_id": "11111111-1111-4111-8111-111111111111",
   "conversation_id": "22222222-2222-4222-8222-222222222222",
   "question_id": 1,
+  "mode": "solve",
   "status": "succeeded",
   "reply": "等式两边减去 3 得到 2x = 8，再除以 2，得到 x = 4。",
   "model": "配置的模型名称",
@@ -124,6 +128,7 @@ input_tokens 包含供应商返回的普通输入、缓存读取和缓存写入 
   "job_id": "11111111-1111-4111-8111-111111111111",
   "conversation_id": "22222222-2222-4222-8222-222222222222",
   "question_id": 1,
+  "mode": "solve",
   "status": "failed",
   "error": "解答超时，请稍后重试",
   "code": "AI_TIMEOUT",
@@ -155,6 +160,7 @@ HTTP 200 返回任务对象。排队/运行中的任务变为 cancelled；已完
 | 404 | QUESTION_NOT_FOUND | 返回题目列表或提示题目不可用 |
 | 404 | JOB_NOT_FOUND / CONVERSATION_NOT_FOUND | 状态过期或资源不可访问；提示用户重新开始对话 |
 | 405 | METHOD_NOT_ALLOWED | 检查请求方法 |
+| 409 | CONVERSATION_MODE_MISMATCH | 省略 conversation_id，以新模式新建对话 |
 | 409 | CONVERSATION_BUSY | 等待当前任务结束 |
 | 409 | CONVERSATION_LIMIT | 对话已达历史长度限制，省略 conversation_id 开始新对话 |
 | 413 | REQUEST_TOO_LARGE | 缩短请求内容 |
@@ -170,12 +176,12 @@ HTTP 错误和 failed 任务都会停止当前客户端轮询；网络错误可�
 
 ## 6. 对话和状态生命周期
 
-- 对话绑定当前用户和 question_id，跨用户或跨题目访问返回 404。
+- 对话绑定当前用户、question_id 和教学模式。跨用户或跨题目返回 404；同对话改 mode 返回 409。
 - 服务端保存完整模型/工具消息；前端仅保存 conversation_id。
 - 同一对话最多 12 轮成功提问；历史过长时返回 CONVERSATION_LIMIT。
 - 默认成功/失败/取消任务与闲置对话保存 1 小时，过期后访问返回 404。
 - 本版状态在 Pi 服务内存中，重启该服务后清空；C 后端重启后用户需要重新登录。
-- 本版提供文本解答和受限算术工具，消息接口接收文本；图片/PDF 上传、fork 和持久化对话树不包含在此契约中。
+- 本版提供三个教学模式、受限算术与一元一次方程求解/代入校验工具，消息接口接收文本；图片/PDF 上传、fork 和持久化对话树不包含在此契约中。
 
 ## 7. 接入现有前端的修改点
 
@@ -199,7 +205,7 @@ addMessage('ai', result.reply);
 ```
 
 - 发送期间禁用重复发送；切换题目、退出登录时清理/取消旧任务，防止回复出现在错误的题目页面。
-- conversation_id 应按“用户＋题目”隔离保存；切换用户时清空。
+- conversation_id 应按“用户＋题目＋教学模式”隔离保存；切换用户时清空。
 - 取消按钮调用 abortController.abort()；示例客户端会在已知 job_id 时发送 DELETE。
 - 示例客户端默认每 800 ms 查询一次，等待上限 45 秒；如后端延长总时限，请同步设置 timeoutMs。
 - 保留明确标注的 file:// 离线演示，但在线业务失败应显示真实错误，不静默切换模拟数据。
@@ -212,5 +218,49 @@ addMessage('ai', result.reply);
 - failed / cancelled 能结束 loading；模型异常不会显示为“无回复”。
 - 能取消任务；切换题目后旧请求不会覆盖新页面。
 - 404 不触发在线模拟回复回退；供应商错误不会清理用户登录。
+
+## 9. 基础解题模式（1.1 新增）
+
+| mode | 用途 | 界面建议 |
+| --- | --- | --- |
+| solve | 完整讲解、关键步骤和答案检查 | 默认“讲解” |
+| hint | 分层提示，保留学生推导空间 | “给我提示” |
+| review | 检查学生答案或过程，定位首个可确认错误 | “检查作答”，显示作答输入框 |
+
+提示任务首次返回 `mode:"hint", hint_level:1`；每轮成功后，下一轮升至 2、3 级，此后保持 3。
+失败/取消不会升级。一级侧重方向，二级给公式，三级给下一步操作。层级由后端决定，前端不传 hint_level。
+提示内容由模型生成，真实模型评测前不能保证其完全不泄露答案；Mock 只验证接口，不代表教学质量。
+
+切换模式时清理当前 conversation_id，建立新对话。后端拒绝在已有对话切换模式，避免完整答案历史混入提示模式。
+提示模式下学生在 message 中要求“直接给答案”，服务仍选择提示技能；要查看完整讲解请由页面切换到 solve。
+
+提示请求：
+
+```json
+{"question_id":1,"message":"给我一个方向","mode":"hint"}
+```
+
+错因分析请求：
+
+```json
+{"question_id":1,"message":"检查我的移项过程","mode":"review","student_answer":"2x+3=11，所以2x=14，x=7。"}
+```
+
+review 追问可以省略 mode，仍需传 student_answer（前端保留作答输入框内容即可）。仅有最终答案时后端会指导模型检查答案，不能声称找到了学生未提供的中间错误。
+
+所有任务状态都增加 mode；仅 hint 增加 hint_level。旧调用不传新字段仍按 solve 工作，异步状态流程保持一致。
+
+客户端示例：
+
+```javascript
+const job = await sendPiChat({
+  questionId: currentQuestionId, message: '检查我的作答',
+  mode: 'review', studentAnswer: answerInput.value,
+  token: API.getToken(), onStatus: updateLoading
+});
+```
+
+新增验收：能选择三个模式；提示追问展示1→2→3级；切换模式建新对话；review缺失/过长作答能提示修正；取消后不升级提示。
+目前自动数学工具仅支持 a*x+b=c，模型需正确整理系数；数值校验不等于原题、单位、定义域全部核验通过。
 
 后端启动及真实模型配置见仓库 `ai-service/README.md`。此档案不含任何密钥。

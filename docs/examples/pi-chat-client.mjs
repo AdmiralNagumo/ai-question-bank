@@ -10,12 +10,19 @@ export class PiChatError extends Error {
 }
 
 export async function sendPiChat({ questionId, message, conversationId, token,
+                                  mode, studentAnswer,
                                   baseUrl = '', onStatus = () => {}, signal,
                                   pollMs = 800, timeoutMs = 45000 }) {
   if (!Number.isInteger(questionId) || questionId <= 0 || questionId > 2147483647 ||
       typeof message !== 'string' || !message.trim() || Array.from(message).length > 4000 ||
       message.includes('\0')) {
     throw new PiChatError('请输入有效题目和 1–4000 字的问题', { code: 'INVALID_REQUEST', status: 400 });
+  }
+  if ((mode !== undefined && !['solve', 'hint', 'review'].includes(mode)) ||
+      (studentAnswer !== undefined && (typeof studentAnswer !== 'string' || !studentAnswer.trim() ||
+        Array.from(studentAnswer).length > 4000 || studentAnswer.includes('\0'))) ||
+      (mode !== undefined && ((mode === 'review') !== (studentAnswer !== undefined)))) {
+    throw new PiChatError('请检查教学模式和学生作答；错因分析需要提供作答', { code: 'INVALID_REQUEST', status: 400 });
   }
   const controller = new AbortController();
   let localTimeout = false;
@@ -59,6 +66,8 @@ export async function sendPiChat({ questionId, message, conversationId, token,
   try {
     const created = await request(prefix, 'POST', {
       question_id: questionId, message, ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(mode !== undefined ? { mode } : {}),
+      ...(studentAnswer !== undefined ? { student_answer: studentAnswer } : {}),
     });
     jobId = created.job_id;
     if (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/.test(jobId)) {

@@ -1,4 +1,5 @@
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type TeachingMode = 'solve' | 'hint' | 'review';
 export interface Question {
   id: number;
   content: string;
@@ -11,6 +12,8 @@ export interface Submission {
   question: Question;
   message: string;
   conversation_id?: string;
+  mode?: TeachingMode;
+  student_answer?: string;
 }
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -35,8 +38,10 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
 
 export function parseSubmission(value: unknown): Submission {
   const fail = () => { throw new ApiError(400, 'INVALID_REQUEST', '请求字段或格式不正确'); };
-  if (!record(value) || !onlyKeys(value, ['user_id', 'question', 'message', 'conversation_id']) ||
+  if (!record(value) || !onlyKeys(value, ['user_id', 'question', 'message', 'conversation_id', 'mode', 'student_answer']) ||
       !positive(value.user_id) || !text(value.message, 4000)) return fail();
+  if (value.mode !== undefined && (typeof value.mode !== 'string' || !['solve', 'hint', 'review'].includes(value.mode))) return fail();
+  if (value.student_answer !== undefined && !text(value.student_answer, 4000)) return fail();
   const question = value.question;
   if (!record(question) || !onlyKeys(question, ['id', 'content', 'options', 'knowledge_points', 'type']) ||
       !positive(question.id) || !text(question.content, 8000) || !text(question.type, 64) ||

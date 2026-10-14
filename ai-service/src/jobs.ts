@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
 import { startAgent, type AgentRun, type Completion } from './agent.js';
-import { ApiError, type Submission, type JobStatus } from './contracts.js';
+import { ApiError, type Submission, type JobStatus, type TeachingMode } from './contracts.js';
+import type { TeachingContext } from './teaching.js';
 
 interface Conversation {
   id: string;
   owner: number;
   question: number;
+  mode: TeachingMode;
   messages: AgentMessage[];
   activeJob?: string;
   touched: number;
@@ -16,6 +18,7 @@ interface Job {
   id: string;
   owner: number;
   request: Submission;
+  teaching: TeachingContext;
   conversation: Conversation;
   status: JobStatus;
   created: number;
@@ -57,6 +60,9 @@ export class Jobs {
         throw new ApiError(404, 'CONVERSATION_NOT_FOUND', '对话不存在或已过期');
       }
       conversation = found;
+      if (request.mode !== undefined && request.mode !== conversation.mode) {
+        throw new ApiError(409, 'CONVERSATION_MODE_MISMATCH', '切换教学模式时请新建对话');
+      }
       if (conversation.activeJob) throw new ApiError(409, 'CONVERSATION_BUSY', '请等待当前解答完成');
       // 保留完整工具消息，达到历史边界时明确要求新对话，不截断工具调用对。
       if (JSON.stringify(conversation.messages).length > 64000 ||
@@ -67,12 +73,19 @@ export class Jobs {
       if (this.conversations.size >= this.config.maxConversations) {
         throw new ApiError(503, 'AI_BUSY', '解答任务已满，请稍后重试');
       }
-      conversation = { id: randomUUID(), owner: request.user_id, question: request.question.id,
+      conversation = { id: randomUUID(), owner: request.user_id, question: request.question.id, mode: request.mode ?? 'solve',
                        messages: [], touched: Date.now() };
-      this.conversations.set(conversation.id, conversation);
+    }
+    if ((conversation.mode === 'review') !== (request.student_answer !== undefined)) {
+      throw new ApiError(400, 'INVALID_REQUEST', '错因分析须提供 student_answer；其他模式不接受该字段');
+    }
+    this.conversations.set(conversation.id, conversation);
+    const teaching: TeachingContext = { mode: conversation.mode };
+    if (conversation.mode === 'hint') {
+      teaching.hintLevel = Math.min(3, 1 + conversation.messages.filter(message => message.role === 'user').length);
     }
     const job: Job = { id: randomUUID(), owner: request.user_id, request, conversation,
-                       status: 'queued', created: Date.now() };
+                       teaching, status: 'queued', created: Date.now() };
     conversation.activeJob = job.id;
     conversation.touched = Date.now();
     this.jobs.set(job.id, job);
@@ -104,6 +117,8 @@ export class Jobs {
     const result: Record<string, unknown> = {
       job_id: job.id, conversation_id: job.conversation.id, question_id: job.request.question.id,
       status: job.status,
+      mode: job.teaching.mode,
+      ...(job.teaching.hintLevel !== undefined ? { hint_level: job.teaching.hintLevel } : {}),
     };
     if (job.result) { result.reply = job.result.reply; result.model = job.result.model; result.usage = job.result.usage; }
     if (job.error) Object.assign(result, job.error);
@@ -121,7 +136,7 @@ export class Jobs {
     try {
       const remaining = this.config.timeoutMs - (Date.now() - job.created);
       if (remaining <= 0) throw new ApiError(504, 'AI_TIMEOUT', '解答超时，请稍后重试');
-      job.run = startAgent({ ...this.config, timeoutMs: remaining }, job.request, job.conversation.messages);
+      job.run = startAgent({ ...this.config, timeoutMs: remaining }, job.request, job.conversation.messages, job.teaching);
       const result = await job.run.completion;
       if (job.status !== 'cancelled') {
         job.status = 'succeeded'; job.result = { ...result, messages: [] };

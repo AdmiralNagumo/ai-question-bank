@@ -8,6 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/service.test.js",
+    "eval": "npm run build && node dist/src/evaluate.js",
     "start": "node --env-file-if-exists=.env dist/src/server.js"
   },
   "dependencies": {

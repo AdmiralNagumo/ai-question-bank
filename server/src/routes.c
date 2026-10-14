@@ -581,11 +581,23 @@ static int chat_contains_null_escape(const char *body, size_t length) {
     return 0;
 }
 
+static int chat_text_valid(cJSON *value) {
+    if (!cJSON_IsString(value)) return 0;
+    size_t characters = 0;
+    int nonspace = 0;
+    for (const unsigned char *p = (const unsigned char *)value->valuestring; *p; p++) {
+        if ((*p & 0xc0) != 0x80) characters++;
+        if (!isspace(*p)) nonspace = 1;
+    }
+    return nonspace && characters <= 4000;
+}
+
 static int chat_fields_valid(cJSON *root) {
     if (!cJSON_IsObject(root)) return 0;
     for (cJSON *field = root->child; field != NULL; field = field->next) {
         if (strcmp(field->string, "question_id") != 0 && strcmp(field->string, "message") != 0 &&
-            strcmp(field->string, "conversation_id") != 0) return 0;
+            strcmp(field->string, "conversation_id") != 0 && strcmp(field->string, "mode") != 0 &&
+            strcmp(field->string, "student_answer") != 0) return 0;
         for (cJSON *previous = root->child; previous != field; previous = previous->next) {
             if (strcmp(previous->string, field->string) == 0) return 0;
         }
@@ -593,15 +605,15 @@ static int chat_fields_valid(cJSON *root) {
     cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "question_id");
     cJSON *message = cJSON_GetObjectItemCaseSensitive(root, "message");
     cJSON *conversation = cJSON_GetObjectItemCaseSensitive(root, "conversation_id");
+    cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    cJSON *answer = cJSON_GetObjectItemCaseSensitive(root, "student_answer");
     if (!cJSON_IsNumber(id) || id->valueint <= 0 || (double)id->valueint != id->valuedouble ||
-        !cJSON_IsString(message)) return 0;
-    size_t characters = 0;
-    int nonspace = 0;
-    for (const unsigned char *p = (const unsigned char *)message->valuestring; *p; p++) {
-        if ((*p & 0xc0) != 0x80) characters++;
-        if (!isspace(*p)) nonspace = 1;
-    }
-    if (!nonspace || characters > 4000) return 0;
+        !chat_text_valid(message)) return 0;
+    if (mode != NULL && (!cJSON_IsString(mode) ||
+        (strcmp(mode->valuestring, "solve") != 0 && strcmp(mode->valuestring, "hint") != 0 &&
+         strcmp(mode->valuestring, "review") != 0))) return 0;
+    if (answer != NULL && !chat_text_valid(answer)) return 0;
+    if (mode != NULL && ((strcmp(mode->valuestring, "review") == 0) != (answer != NULL))) return 0;
     return conversation == NULL || (cJSON_IsString(conversation) && chat_uuid_valid(conversation->valuestring));
 }
 
@@ -657,6 +669,11 @@ static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
         if (valid && cJSON_AddStringToObject(request, "message", message->valuestring) == NULL) valid = 0;
         cJSON *conversation = cJSON_GetObjectItemCaseSensitive(input, "conversation_id");
         if (valid && conversation != NULL && cJSON_AddStringToObject(request, "conversation_id", conversation->valuestring) == NULL) valid = 0;
+        const char *teaching_fields[] = { "mode", "student_answer" };
+        for (size_t i = 0; valid && i < sizeof(teaching_fields) / sizeof(teaching_fields[0]); i++) {
+            cJSON *value = cJSON_GetObjectItemCaseSensitive(input, teaching_fields[i]);
+            if (value != NULL && cJSON_AddStringToObject(request, teaching_fields[i], value->valuestring) == NULL) valid = 0;
+        }
         if (valid) payload = cJSON_PrintUnformatted(request);
         cJSON_Delete(request); cJSON_Delete(source); cJSON_Delete(input);
         if (payload == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "题目读取失败");

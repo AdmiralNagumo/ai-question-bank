@@ -77,7 +77,11 @@
 ## 7. Pi AI 服务与异步任务
 
 `ai-service/` 为独立的 Node.js/TypeScript 模块，固定使用 Pi 0.84.1 的 pi-ai 与 pi-agent-core。
-它提供模型协议适配、每任务独立 Agent、受限算术工具、有界队列和用户/题目隔离的对话历史。
+它提供模型协议适配、每任务独立 Agent、有界队列和用户/题目/教学模式隔离的对话历史。
+`skills/` 下三个 SKILL.md 由 `src/teaching.ts` 加载，后端按 solve/hint/review 只注入选中的技能。
+hint 层级按成功轮次递增到3，失败/取消不升级；同对话不能切换模式。
+`src/math-tools.ts` 提供数值系数一元一次方程求解和候选解代入校验；算术工具保留，hint不开放方程工具。
+工具只核验输入数值，不证明模型列式、定义域或教学反馈正确。质量验收使用 `eval/fixtures.json` 的30个案例。
 前端契约见 [pi-chat-api.md](pi-chat-api.md)，部署和配置见 [../ai-service/README.md](../ai-service/README.md)。
 
 公共流程：用户登录 → C 读取题目 → POST /api/v1/chat 接受任务（202） →

@@ -74,7 +74,8 @@ AI_MODEL=gpt-4o-mini
 ## Pi Agent 后端
 
 C 主后端通过内部 HTTP 接口调用独立的 Node.js/TypeScript Pi 服务。
-支持异步解答、同题追问、取消任务和受限算术工具，默认可用 Mock 联调。
+支持完整讲解、分层提示、错因分析，以及异步任务、同题追问和取消，默认可用 Mock 联调。
+提供受限算术、一元一次方程求解/代入校验工具和30个解题评测案例。
 
 - 启动与模型配置：[ai-service/README.md](ai-service/README.md)
 - 前端接口档案：[docs/pi-chat-api.md](docs/pi-chat-api.md)

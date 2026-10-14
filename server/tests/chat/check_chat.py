@@ -92,4 +92,35 @@ elif mode == 'isolation':
     assert request('/api/v1/chat/' + job['job_id'], token=token)[0] == 401
     print('PASS: 用户隔离、对话锁定、取消任务与登出后的权限检查')
 else:
-    raise ValueError(mode)
+    if mode != 'teaching': raise ValueError(mode)
+    for value in [{**message, 'mode': 'bad'}, {**message, 'mode': ['solve']},
+                  {**message, 'mode': None}, {**message, 'mode': 'review'},
+                  {**message, 'mode': 'review', 'student_answer': ''},
+                  {**message, 'mode': 'review', 'student_answer': 4},
+                  {**message, 'mode': 'review', 'student_answer': 'x' * 4001},
+                  {**message, 'mode': 'review', 'student_answer': 'x\0y'},
+                  {**message, 'mode': 'hint', 'student_answer': 'x=7'},
+                  {**message, 'student_answer': 'x=7'}]:
+        assert request('/api/v1/chat', 'POST', value, token)[0] == 400
+    assert request('/api/v1/chat', 'POST', token=token,
+                   raw=b'{"question_id":1,"message":"a","mode":"solve","mode":"hint"}')[0] == 400
+    conversation = None
+    for expected in [1, 2, 3, 3]:
+        payload = {**message, 'mode': 'hint'} if conversation is None else {**message, 'conversation_id': conversation}
+        status, job = request('/api/v1/chat', 'POST', payload, token)
+        assert status == 202 and job['mode'] == 'hint' and job['hint_level'] == expected
+        finished = complete(job['job_id'], token)
+        assert finished['status'] == 'succeeded' and finished['hint_level'] == expected
+        assert f'提示 {expected} 级' in finished['reply']
+        conversation = finished['conversation_id']
+    status, mismatch = request('/api/v1/chat', 'POST', {**message, 'mode': 'solve', 'conversation_id': conversation}, token)
+    assert status == 409 and mismatch['code'] == 'CONVERSATION_MODE_MISMATCH'
+    status, job = request('/api/v1/chat', 'POST', {**message, 'mode': 'review', 'student_answer': 'x=7'}, token)
+    assert status == 202 and job['mode'] == 'review' and 'hint_level' not in job
+    first = complete(job['job_id'], token)
+    assert first['status'] == 'succeeded'
+    assert request('/api/v1/chat', 'POST', {**message, 'conversation_id': first['conversation_id']}, token)[0] == 400
+    status, job = request('/api/v1/chat', 'POST', {**message, 'conversation_id': first['conversation_id'], 'student_answer': 'x=4'}, token)
+    assert status == 202 and job['mode'] == 'review'
+    assert complete(job['job_id'], token)['status'] == 'succeeded'
+    print('PASS: C/Pi 教学模式、提示1→2→3、模式隔离、作答校验及追问继承')

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "题库 Pi Agent 公共接口",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "前端仅调用 C 后端。POST 接受异步任务，GET 查询结果；任务失败可在 HTTP 200 中以 status=failed 返回。"
   },
   "servers": [
@@ -83,7 +83,7 @@
             }
           },
           "409": {
-            "description": "对话忙或历史达到上限",
+            "description": "对话忙、历史过长或教学模式不匹配；切换模式需新建对话",
             "content": {
               "application/json": {
                 "schema": {
@@ -368,11 +368,92 @@
           "conversation_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ],
+            "description": "新对话省略为solve；追问省略则沿用对话模式。切换模式需新对话。"
+          },
+          "student_answer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S",
+            "description": "review每轮必填，其他模式不接受；允许只提交最终答案。"
           }
         },
         "required": [
           "question_id",
           "message"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "review"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "student_answer"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "solve",
+                    "hint"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "student_answer"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "student_answer"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "mode"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "conversation_id"
+                    ]
+                  }
+                ]
+              }
+            },
+            "then": {
+              "not": {}
+            }
+          }
         ]
       },
       "Error": {
@@ -438,13 +519,51 @@
           "status": {
             "type": "string",
             "const": "queued"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ]
+          },
+          "hint_level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "仅hint模式返回，提示层级由成功轮次决定。"
           }
         },
         "required": [
           "job_id",
           "conversation_id",
           "question_id",
-          "status"
+          "status",
+          "mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "hint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "hint_level"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "hint_level"
+                ]
+              }
+            }
+          }
         ]
       },
       "RunningJob": {
@@ -467,13 +586,51 @@
           "status": {
             "type": "string",
             "const": "running"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ]
+          },
+          "hint_level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "仅hint模式返回，提示层级由成功轮次决定。"
           }
         },
         "required": [
           "job_id",
           "conversation_id",
           "question_id",
-          "status"
+          "status",
+          "mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "hint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "hint_level"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "hint_level"
+                ]
+              }
+            }
+          }
         ]
       },
       "SucceededJob": {
@@ -505,6 +662,20 @@
           },
           "usage": {
             "$ref": "#/components/schemas/Usage"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ]
+          },
+          "hint_level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "仅hint模式返回，提示层级由成功轮次决定。"
           }
         },
         "required": [
@@ -514,7 +685,31 @@
           "status",
           "reply",
           "model",
-          "usage"
+          "usage",
+          "mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "hint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "hint_level"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "hint_level"
+                ]
+              }
+            }
+          }
         ]
       },
       "FailedJob": {
@@ -552,6 +747,20 @@
               503,
               504
             ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ]
+          },
+          "hint_level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "仅hint模式返回，提示层级由成功轮次决定。"
           }
         },
         "required": [
@@ -561,7 +770,31 @@
           "status",
           "error",
           "code",
-          "http_status"
+          "http_status",
+          "mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "hint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "hint_level"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "hint_level"
+                ]
+              }
+            }
+          }
         ]
       },
       "CancelledJob": {
@@ -584,13 +817,51 @@
           "status": {
             "type": "string",
             "const": "cancelled"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "solve",
+              "hint",
+              "review"
+            ]
+          },
+          "hint_level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "仅hint模式返回，提示层级由成功轮次决定。"
           }
         },
         "required": [
           "job_id",
           "conversation_id",
           "question_id",
-          "status"
+          "status",
+          "mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "hint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "hint_level"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "hint_level"
+                ]
+              }
+            }
+          }
         ]
       },
       "Job": {
