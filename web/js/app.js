@@ -46,7 +46,9 @@ window.app = {
 
   logout() {
     // 尝试调用后端退出 API，然后清除本地状态
-    API.logout().catch(() => {});
+    API.logout().catch((err) => {
+      console.warn('[APP] 登出请求失败：', err);
+    });
     API.clearAuth();
     navigate('#login');
   },

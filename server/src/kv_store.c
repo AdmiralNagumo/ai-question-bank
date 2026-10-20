@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
+#include <unistd.h>
+
 #include <sqlite3.h>
 
 #include "cJSON.h"
@@ -554,6 +557,180 @@ void kv_free_str_array(char **arr) {
     free(arr);
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 大文件存取扩展
+ * ═══════════════════════════════════════════════════════════════════════════ */
+/* 模块级基址目录；默认 "."，通过 kv_set_base_dir 修改 */
+static char *g_base_dir = NULL;
+
+void kv_set_base_dir(const char *base_dir) {
+    free(g_base_dir);
+    g_base_dir = NULL;
+    if (base_dir != NULL) {
+        /* 去掉尾部多余的 '/' */
+        size_t len = strlen(base_dir);
+        while (len > 0 && base_dir[len - 1] == '/') len--;
+        if (len == 0 && base_dir[0] == '/') {
+            /* 根目录："/" 或 "///" → "/" */
+            g_base_dir = strdup("/");
+        } else {
+            g_base_dir = strndup(base_dir, len);
+        }
+    }
+}
+
+static const char *get_base_dir(void) {
+    return g_base_dir ? g_base_dir : ".";
+}
+
+/**
+ * @brief 就地规范化路径：消除 . 、.. 和连续斜杠。
+ *        不访问文件系统，纯字符串处理。
+ *        不处理符号链接（符号链接穿越由 open() 的 O_NOFOLLOW 可选防护）。
+ * @param path  输入路径字符串，就地修改。
+ *              若 .. 数量超出根（如 "/a/../../x"），返回空串。
+ * @return const char*  指向规范化后的字符串（path 本身）。
+ *                      若路径非法或结果为空，返回 ""。
+ */
+static const char *normalize_path(char *path) {
+    if (path == NULL || path[0] == '\0') return "";
+
+    /* 记录是否以 '/' 开头（绝对路径） */
+    int is_absolute = (path[0] == '/');
+
+    /* 按 '/' 拆分，用栈思想处理 */
+    char *stack[256];  /* 最多 256 级深度 */
+    int depth = 0;
+
+    char *saveptr;
+    char *token = strtok_r(path, "/", &saveptr);
+    while (token != NULL) {
+        if (strcmp(token, ".") == 0 || token[0] == '\0') {
+            /* 跳过 '.' 和空串 */
+        } else if (strcmp(token, "..") == 0) {
+            if (depth > 0) {
+                depth--;
+            } else if (!is_absolute) {
+                /* 相对路径，.. 可以超越起点：保留 */
+                if (depth >= 255) return "";
+                stack[depth++] = token;
+            }
+            /* 绝对路径的 /.. 被忽略（已到根） */
+        } else {
+            if (depth >= 255) return "";
+            stack[depth++] = token;
+        }
+        token = strtok_r(NULL, "/", &saveptr);
+    }
+
+    /* 重建路径 */
+    if (is_absolute && depth == 0) {
+        path[0] = '/';
+        path[1] = '\0';
+        return path;
+    }
+    if (!is_absolute && depth == 0) {
+        path[0] = '.';
+        path[1] = '\0';
+        return path;
+    }
+
+    char *dst = path;
+    for (int i = 0; i < depth; i++) {
+        if (i > 0 || is_absolute) *dst++ = '/';
+        size_t len = strlen(stack[i]);
+        memmove(dst, stack[i], len);
+        dst += len;
+    }
+    *dst = '\0';
+    return path;
+}
+
+/**
+ * @brief 检查规范化后的路径是否在 base_dir 子树内。
+ * @param normalized  已规范化的路径（经过 normalize_path()）。
+ * @param base        基址目录（已剥离尾部斜杠）。
+ * @return int  1 在子树内（安全）；0 穿越（拒绝）。
+ */
+static int path_is_under(const char *normalized, const char *base) {
+    size_t base_len = strlen(base);
+    /* 根目录：所有以 '/' 开头的路径均在 / 下 */
+    if (base_len == 1 && base[0] == '/') return (normalized[0] == '/');
+    /* 规范化后的路径必须以 base 开头，且紧跟着 '/' 或 '\0' */
+    if (strncmp(normalized, base, base_len) != 0) return 0;
+    char next = normalized[base_len];
+    return (next == '/' || next == '\0');
+}
+
+int kv_file_open(sqlite3 *db,
+                 const char *namespace,
+                 const char *key,
+                 const char *value_name,
+                 int flags,
+                 mode_t mode) {
+    if (db == NULL || namespace == NULL || key == NULL || value_name == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* 1. 从 kv 读取文件路径 */
+    char *path = kv_get(db, namespace, key, value_name);
+    if (path == NULL) {
+        /* 未找到值：区分"不存在"和"出错"。
+         * kv_get 出错也返回 NULL，这里统一按不存在处理；
+         * 若需精确诊断，可检查 kv_get 内部日志。 */
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* 2. 路径解析：绝对路径直接使用，相对路径规范化后校验子树 */
+    const char *final_path = path;
+    char *resolved = NULL;
+
+    if (path[0] != '/') {
+        const char *base = get_base_dir();
+        size_t needed = strlen(base) + 1 + strlen(path) + 1;
+        resolved = malloc(needed);
+        if (resolved == NULL) {
+            free(path);
+            errno = ENOMEM;
+            return -1;
+        }
+        snprintf(resolved, needed, "%s/%s", base, path);
+
+        /* 规范化路径（消除 . 和 ..） */
+        if (normalize_path(resolved)[0] == '\0') {
+            free(path);
+            free(resolved);
+            errno = EINVAL;
+            return -1;
+        }
+
+        /* 路径穿越检测：规范化后的路径必须在 base_dir 子树内 */
+        if (!path_is_under(resolved, base)) {
+            fprintf(stderr, "✘ kv_file_open: 路径穿越被拒绝: '%s' 不在 '%s' 内\n",
+                    resolved, base);
+            free(path);
+            free(resolved);
+            errno = EACCES;
+            return -1;
+        }
+        final_path = resolved;
+    }
+
+    /* 3. 打开文件 */
+    int fd = open(final_path, flags, mode);
+
+    /* 4. 清理并返回 */
+    free(path);
+    free(resolved);
+    return fd;
+}
+
+
+
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 类型转换工具
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -572,6 +749,7 @@ int kv_str_to_int(const char *str, int *out) {
  * 以下类型转换函数当前未被任何调用方使用（死代码），保留注释以供参考。
  * 如需启用，取消注释并在 kv_store.h 中恢复对应的声明。
  * ═══════════════════════════════════════════════════════════════════════════ */
+
 #if 0
 int kv_str_to_double(const char *str, double *out) {
     if (str == NULL || out == NULL) return -1;

@@ -2,6 +2,9 @@
 #define AIQB_KV_STORE_H
 
 #include <sqlite3.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 /**
  * @file kv_store.h
@@ -223,5 +226,43 @@ int kv_str_array_to_int(char **strs, int **out, int *count);
 int kv_str_array_to_double(char **strs, double **out, int *count);
 
 #endif /* 死代码 */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 大文件存取扩展
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief 设置相对路径解析基址。
+ *        当 kv 中存储的路径为相对路径（不以 '/' 开头）时，
+ *        打开文件前会拼接 `base_dir + "/" + relative_path`。
+ *        未调用时默认使用 "."（当前进程工作目录）。
+ * @param base_dir  基址目录路径，内部会复制一份。传入 NULL 恢复默认。
+ * @note 调用者需保证 base_dir 字符串在调用期间有效（函数内部立即 strdup）。
+ * @note 此函数非线程安全，建议在初始化阶段调用一次。
+ */
+void kv_set_base_dir(const char *base_dir);
+
+/**
+ * @brief 从 kv_store 读取文件路径并打开文件。
+ *        先从 kv 中获取 value（应为文件路径字符串），然后根据路径类型打开文件：
+ *        - 绝对路径（以 '/' 开头）：直接传给 open()。
+ *        - 相对路径：拼接 base_dir + "/" + path 后传给 open()。
+ * @param db          已打开的 SQLite 数据库句柄（不可为 NULL）。
+ * @param namespace   一级目录名。
+ * @param key         键名。
+ * @param value_name  值名（其 value 应为文件路径）。
+ * @param flags       open() 的标志位（如 O_RDONLY, O_WRONLY | O_CREAT 等）。
+ * @param mode        创建文件时的权限（仅 flags 含 O_CREAT 时生效），如 0644。
+ * @return int  成功返回文件描述符（>= 0）；失败返回 -1 并设置 errno。
+ * @note 调用者负责 close(fd)。
+ * @note 内部调用 kv_get()，返回字符串在函数内部已释放，不会泄漏。
+ * @note 若 kv 中未找到对应值，置 errno = ENOENT 并返回 -1。
+ */
+int kv_file_open(sqlite3 *db,
+                 const char *namespace,
+                 const char *key,
+                 const char *value_name,
+                 int flags,
+                 mode_t mode);
 
 #endif /* AIQB_KV_STORE_H */

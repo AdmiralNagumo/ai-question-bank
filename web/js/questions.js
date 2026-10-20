@@ -2,16 +2,6 @@
 const QuestionsPage = (() => {
   const $ = (id) => document.getElementById(id);
 
-  /** HTML 转义：题目内容来自后端，拼进 innerHTML 前必须转义，防注入 */
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
   function show() {
     $('page-login').classList.add('hidden');
     $('navbar').classList.remove('hidden');

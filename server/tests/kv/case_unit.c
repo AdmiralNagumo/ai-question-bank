@@ -8,9 +8,12 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sqlite3.h>
 
@@ -353,9 +356,192 @@ static void test_str_to_int(sqlite3 *db) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * 以下测试函数对应 kv_store.c 中已注释的死代码函数。
- * 若恢复那些函数，取消下方注释并取消 main() 中对应的调用注释。
+ * 大文件存取测试用例
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_file_absolute_path(sqlite3 *db) {
+    TEST("kv_file_open 绝对路径打开文件");
+    const char *fpath = "/tmp/kv_test_abs.txt";
+    FILE *f = fopen(fpath, "w");
+    ASSERT_TRUE(f != NULL, "创建测试文件失败");
+    fprintf(f, "hello absolute\n");
+    fclose(f);
+
+    kv_set(db, "files", "abs", "path", fpath);
+    int fd = kv_file_open(db, "files", "abs", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd >= 0, "kv_file_open 绝对路径应成功");
+
+    char buf[64] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(n > 0 && strcmp(buf, "hello absolute\n") == 0,
+               "文件内容应匹配");
+    unlink(fpath);
+    PASS();
+}
+
+static void test_file_relative_path(sqlite3 *db) {
+    TEST("kv_file_open 相对路径打开文件（base_dir=/tmp）");
+    const char *fpath = "/tmp/kv_test_rel.txt";
+    FILE *f = fopen(fpath, "w");
+    ASSERT_TRUE(f != NULL, "创建测试文件失败");
+    fprintf(f, "hello relative\n");
+    fclose(f);
+
+    kv_set_base_dir("/tmp");
+    kv_set(db, "files", "rel", "path", "kv_test_rel.txt");
+    int fd = kv_file_open(db, "files", "rel", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd >= 0, "kv_file_open 相对路径应成功");
+
+    char buf[64] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(n > 0 && strcmp(buf, "hello relative\n") == 0,
+               "文件内容应匹配");
+
+    kv_set_base_dir(NULL); /* 恢复默认 */
+    unlink(fpath);
+    PASS();
+}
+
+static void test_file_not_found(sqlite3 *db) {
+    TEST("kv_file_open 不存在的 key 返回 -1 (ENOENT)");
+    int fd = kv_file_open(db, "files", "no_such_key", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "应返回 -1");
+    ASSERT_TRUE(errno == ENOENT, "errno 应为 ENOENT");
+    PASS();
+}
+
+static void test_file_null_params(sqlite3 *db) {
+    TEST("kv_file_open NULL 参数返回 -1 (EINVAL)");
+
+    int fd = kv_file_open(NULL, "ns", "k", "vn", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "NULL db 应返回 -1");
+    ASSERT_TRUE(errno == EINVAL, "errno 应为 EINVAL");
+
+    fd = kv_file_open(db, NULL, "k", "vn", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "NULL namespace 应返回 -1");
+    ASSERT_TRUE(errno == EINVAL, "errno 应为 EINVAL");
+
+    fd = kv_file_open(db, "ns", NULL, "vn", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "NULL key 应返回 -1");
+    ASSERT_TRUE(errno == EINVAL, "errno 应为 EINVAL");
+
+    fd = kv_file_open(db, "ns", "k", NULL, O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "NULL value_name 应返回 -1");
+    ASSERT_TRUE(errno == EINVAL, "errno 应为 EINVAL");
+    PASS();
+}
+
+static void test_file_base_dir_slash_strip(sqlite3 *db) {
+    TEST("kv_set_base_dir 去除尾部多余 /");
+    const char *fpath = "/tmp/kv_test_strip.txt";
+    FILE *f = fopen(fpath, "w");
+    ASSERT_TRUE(f != NULL, "创建测试文件失败");
+    fprintf(f, "strip ok\n");
+    fclose(f);
+
+    kv_set_base_dir("/tmp///"); /* 尾部多余斜杠 */
+    kv_set(db, "files", "strip", "path", "kv_test_strip.txt");
+    int fd = kv_file_open(db, "files", "strip", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd >= 0, "尾部斜杠不应影响打开");
+
+    char buf[64] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(n > 0 && strcmp(buf, "strip ok\n") == 0,
+               "文件内容应匹配");
+
+    kv_set_base_dir(NULL);
+    unlink(fpath);
+    PASS();
+}
+
+static void test_file_write_create(sqlite3 *db) {
+    TEST("kv_file_open O_WRONLY|O_CREAT 创建并写入");
+    const char *fpath = "/tmp/kv_test_write.txt";
+    unlink(fpath); /* 确保干净 */
+
+    kv_set(db, "files", "wr", "path", fpath);
+    int fd = kv_file_open(db, "files", "wr", "path",
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_TRUE(fd >= 0, "O_CREAT 打开应成功");
+
+    const char *msg = "write test ok\n";
+    ssize_t nw = write(fd, msg, strlen(msg));
+    close(fd);
+    ASSERT_TRUE(nw == (ssize_t)strlen(msg), "写入应完整");
+
+    /* 读回验证 */
+    fd = open(fpath, O_RDONLY);
+    ASSERT_TRUE(fd >= 0, "重新打开应成功");
+    char buf[64] = {0};
+    ssize_t nr = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(nr > 0 && strcmp(buf, msg) == 0,
+               "写入内容应匹配");
+    unlink(fpath);
+    PASS();
+}
+
+static void test_file_base_dir_default(sqlite3 *db) {
+    TEST("kv_set_base_dir(NULL) 恢复默认行为");
+    /* 未设置 base_dir 时相对路径相对 CWD；
+     * 用绝对路径验证 kv_set_base_dir(NULL) 后状态干净 */
+    kv_set_base_dir("/tmp");
+    kv_set_base_dir(NULL);
+
+    const char *fpath = "/tmp/kv_test_default.txt";
+    FILE *f = fopen(fpath, "w");
+    ASSERT_TRUE(f != NULL, "创建测试文件失败");
+    fprintf(f, "default ok\n");
+    fclose(f);
+
+    /* 用绝对路径打开，不受 base_dir 影响 */
+    kv_set(db, "files", "def", "path", fpath);
+    int fd = kv_file_open(db, "files", "def", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd >= 0, "绝对路径应成功");
+
+    char buf[64] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(n > 0 && strcmp(buf, "default ok\n") == 0,
+               "文件内容应匹配");
+    unlink(fpath);
+    PASS();
+}
+
+static void test_file_traversal_rejected(sqlite3 *db) {
+    TEST("路径穿越被拒绝 (../etc/passwd → EACCES)");
+    kv_set_base_dir("/tmp/kv_sandbox");
+    /* 确保沙箱目录存在 */
+    system("mkdir -p /tmp/kv_sandbox/sub 2>/dev/null");
+
+    kv_set(db, "files", "evil", "path", "../etc/passwd");
+    int fd = kv_file_open(db, "files", "evil", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "穿越路径应返回 -1");
+    ASSERT_TRUE(errno == EACCES, "errno 应为 EACCES");
+
+    /* 多层穿越 */
+    kv_set(db, "files", "evil2", "path", "sub/../../etc/shadow");
+    fd = kv_file_open(db, "files", "evil2", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd == -1, "多层穿越应返回 -1");
+    ASSERT_TRUE(errno == EACCES, "errno 应为 EACCES");
+
+    /* 合法子目录路径应正常 */
+    kv_set(db, "files", "ok", "path", "sub/../sub/ok.txt");
+    system("echo 'ok' > /tmp/kv_sandbox/sub/ok.txt");
+    fd = kv_file_open(db, "files", "ok", "path", O_RDONLY, 0);
+    ASSERT_TRUE(fd >= 0, "合法路径应成功");
+    char buf[8] = {0};
+    read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT_TRUE(strcmp(buf, "ok\n") == 0, "内容应匹配");
+
+    kv_set_base_dir(NULL);
+    system("rm -rf /tmp/kv_sandbox 2>/dev/null");
+    PASS();
+}
 #if 0
 static void test_str_to_double(sqlite3 *db) {
     (void)db;
@@ -456,6 +642,14 @@ int main(void) {
     test_multiple_namespaces_independence(db);
     test_free_str_array(db);
     test_str_to_int(db);
+    test_file_absolute_path(db);
+    test_file_relative_path(db);
+    test_file_not_found(db);
+    test_file_null_params(db);
+    test_file_base_dir_slash_strip(db);
+    test_file_write_create(db);
+    test_file_base_dir_default(db);
+    test_file_traversal_rejected(db);
 /*
     test_str_to_double(db);
     test_str_array_to_int(db);

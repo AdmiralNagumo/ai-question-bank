@@ -4,18 +4,6 @@ const ChatPage = (() => {
   let currentQuestionId = null;
   let chatMockNoticeShown = false;
 
-  /** HTML 转义：AI 回复属于不可信内容，插入 innerHTML 前必须先转义，
-   *  否则后端返回的 <script> / <img onerror=...> 会被浏览器执行（XSS）。
-   *  这也是 CONTRIBUTING.md 审查清单中「注入」一项的要求。 */
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
   function show(questionId) {
     currentQuestionId = parseInt(questionId, 10);
     $('page-login').classList.add('hidden');
@@ -73,7 +61,7 @@ const ChatPage = (() => {
     const optsEl = $('qOptions');
     if (Array.isArray(q.options) && q.options.length > 0) {
       optsEl.innerHTML = q.options.map(opt =>
-        `<div class="q-opt-item"><span class="q-opt-label">${opt.label}.</span>${opt.text}</div>`
+        `<div class="q-opt-item"><span class="q-opt-label">${escapeHtml(opt.label)}.</span>${escapeHtml(opt.text)}</div>`
       ).join('');
     } else {
       optsEl.innerHTML = '<p style="color:#999;font-size:13px;">（本题为简答/填空类型，无选项）</p>';
