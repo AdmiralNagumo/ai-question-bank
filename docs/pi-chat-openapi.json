@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "题库 Pi Agent 公共接口",
-    "version": "1.1.0",
-    "description": "前端仅调用 C 后端。POST 接受异步任务，GET 查询结果；任务失败可在 HTTP 200 中以 status=failed 返回。"
+    "version": "1.2.0",
+    "description": "前端仅调用 C 后端。POST 接受异步任务，GET 查询结果；任务失败可在 HTTP 200 中以 status=failed 返回。 所有角色默认无AI授权；前端先GET /api/v1/ai/access，POST每次仍由C检查授权。模型配置统一保存在Pi服务端。"
   },
   "servers": [
     {
@@ -133,7 +133,7 @@
             }
           },
           "503": {
-            "description": "服务未配置、不可用或繁忙",
+            "description": "服务未配置、不可用或繁忙；AI_ACCESS_UNAVAILABLE表示权限存储故障，禁止新提交",
             "content": {
               "application/json": {
                 "schema": {
@@ -151,8 +151,19 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "AI_ACCESS_REQUIRED / AI_ACCESS_REVOKED / AI_ACCESS_EXPIRED：保留登录和输入，刷新权限；不自动重试POST",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "description": "仅有效登录且AI授权active可提交。登录/方法检查后先检查授权，再校验请求和题目；接收层超大请求可能先413。撤销不强制杀死已有任务；不提供幂等计费或退款保证。"
       }
     },
     "/api/v1/chat/{job_id}": {
@@ -251,7 +262,8 @@
               }
             }
           }
-        }
+        },
+        "description": "必须有效登录且任务属于本人；AI权限撤销/到期后仍可操作本人既有任务，跨用户404。"
       },
       "delete": {
         "operationId": "cancelChatJob",
@@ -329,6 +341,56 @@
           },
           "504": {
             "description": "内部服务连接超时",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "必须有效登录且任务属于本人；AI权限撤销/到期后仍可操作本人既有任务，跨用户404。"
+      }
+    },
+    "/api/v1/ai/access": {
+      "get": {
+        "operationId": "getAiAccess",
+        "summary": "查询当前登录用户AI使用权限",
+        "description": "只查权限，不探测模型；禁止缓存。所有角色默认not_granted。无授权仍可查询/取消本人既有任务。",
+        "responses": {
+          "200": {
+            "description": "Cache-Control: no-store；active仅表示授权有效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiAccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UNAUTHORIZED：重新登录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "METHOD_NOT_ALLOWED；Allow: GET",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "AI_ACCESS_UNAVAILABLE：存储故障，禁止新发送",
             "content": {
               "application/json": {
                 "schema": {
@@ -880,6 +942,76 @@
           },
           {
             "$ref": "#/components/schemas/CancelledJob"
+          }
+        ]
+      },
+      "AiAccessResponse": {
+        "type": "object",
+        "required": [
+          "ai_access"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ai_access": {
+            "$ref": "#/components/schemas/AiAccess"
+          }
+        }
+      },
+      "AiAccess": {
+        "type": "object",
+        "required": [
+          "allowed",
+          "status",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "description": "allowed为true当且仅当status=active；expires_at为null不表示已授权。以服务器判断为准。",
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_granted",
+              "active",
+              "revoked",
+              "expired"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "UTC RFC3339秒精度；null为未设置，revoked可保留旧到期时间"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "allowed": {
+                "const": true
+              },
+              "status": {
+                "const": "active"
+              }
+            }
+          },
+          {
+            "properties": {
+              "allowed": {
+                "const": false
+              },
+              "status": {
+                "enum": [
+                  "not_granted",
+                  "revoked",
+                  "expired"
+                ]
+              }
+            }
           }
         ]
       }

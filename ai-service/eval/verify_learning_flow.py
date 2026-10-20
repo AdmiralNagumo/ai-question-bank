@@ -58,6 +58,8 @@ with tempfile.TemporaryDirectory(prefix='aqb-v4flash-stage2-') as tmp:
         status, login = request(base, '/api/v1/auth/login', 'POST', {'username':'student','password':'student123'})
         assert status == 200
         token = login['token']
+        subprocess.run(['python3',str(repo / 'scripts/ai_access.py'),'--db',str(Path(tmp) / 'test.db'),'grant',
+                        '--username','student','--reason','isolated real learning-flow test'],check=True,stdout=subprocess.DEVNULL)
         status, questions = request(base, '/api/v1/questions', token=token)
         question = next(q for q in questions['questions'] if '2x' in q['content'].replace(' ', '') and '11' in q['content'])
         qid = question['id']

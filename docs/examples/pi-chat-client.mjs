@@ -9,6 +9,26 @@ export class PiChatError extends Error {
   }
 }
 
+/** 页面预检查；POST仍会重新核验权限，不能用缓存结果作为授权依据。 */
+export async function getPiAiAccess({ token, baseUrl = '', signal } = {}) {
+  let response;
+  try { response = await fetch(baseUrl.replace(/\/$/, '') + '/api/v1/ai/access', {
+    headers: { Authorization: 'Bearer ' + token }, signal,
+  }); }
+  catch { throw new PiChatError('无法查询 AI 使用权限，请重试', { code: 'NETWORK_ERROR' }); }
+  let body;
+  try { body = await response.json(); }
+  catch { throw new PiChatError('权限响应格式不正确', { code: 'INVALID_RESPONSE', status: response.status }); }
+  if (!response.ok) throw new PiChatError(body.error ?? '查询权限失败', { code: body.code ?? 'HTTP_ERROR', status: response.status });
+  const access = body.ai_access;
+  if (!access || !['active','not_granted','revoked','expired'].includes(access.status) ||
+      access.allowed !== (access.status === 'active') ||
+      !(access.expires_at === null || typeof access.expires_at === 'string')) {
+    throw new PiChatError('权限响应格式不正确', { code: 'INVALID_RESPONSE', status: response.status });
+  }
+  return access;
+}
+
 export async function sendPiChat({ questionId, message, conversationId, token,
                                   mode, studentAnswer,
                                   baseUrl = '', onStatus = () => {}, signal,

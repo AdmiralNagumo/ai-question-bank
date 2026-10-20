@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+import subprocess
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
@@ -38,6 +39,8 @@ def complete(job, token):
     raise AssertionError('job did not finish')
 
 token = login('student')
+subprocess.run([sys.executable,'../scripts/ai_access.py','--db',os.environ['DATABASE_PATH'],'grant',
+                '--username','student','--reason','existing chat regression fixture'],check=True,stdout=subprocess.DEVNULL)
 status, result = request('/api/v1/questions', token=token)
 assert status == 200 and result['questions']
 qid = result['questions'][0]['id']
@@ -79,6 +82,8 @@ elif mode == 'isolation':
     status, job = request('/api/v1/chat', 'POST', message, token)
     assert status == 202
     other = login('admin')
+    subprocess.run([sys.executable,'../scripts/ai_access.py','--db',os.environ['DATABASE_PATH'],'grant',
+                   '--username','admin','--reason','ownership regression fixture'],check=True,stdout=subprocess.DEVNULL)
     assert request('/api/v1/chat/' + job['job_id'], token=other)[0] == 404
     assert request('/api/v1/chat/' + job['job_id'], 'DELETE', token=other)[0] == 404
     assert request('/api/v1/chat', 'POST', {**message,

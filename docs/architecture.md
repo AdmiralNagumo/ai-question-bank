@@ -8,15 +8,15 @@
 │ 静态页面  │  /api/v1/*     │ libmicrohttpd + SQLite3      │
 └──────────┘                │ + libcurl（AI 代理）          │
                              └─────────────┬───────────────┘
-                                           │ 代理调用（API Key 不出后端）
+                                           │ 内部HTTP（独立服务凭证）
                                    ┌───────┴───────┐
-                                   │ 大模型供应商    │
-                                   │ (OpenAI 协议)  │
+                                   │ 内部Pi AI服务   │
+                                   │ Node/TS → 模型  │
                                    └───────────────┘
 ```
 
 - `web/` 为纯静态页面（HTML/CSS/JS），由 C 服务端直接托管，**无 Node/npm 工具链**。
-- `server/` 为唯一业务入口：认证鉴权、多租户隔离、题库/试卷/解答树、额度、AI 代理、审计。
+- `server/` 为唯一公共业务入口：现有登录、题目读取、AI授权和任务代理。多租户业务隔离、试卷/解答树与用户额度属于后续目标，当前未完成。
 - 所有大模型调用由后端统一代理，**API Key 只存在于服务端环境变量**。
 
 ## 2. 后端分层（server/）
@@ -28,6 +28,7 @@
 | `src/db.c` + `include/db.h` | 数据库 | SQLite 初始化、建表（users/questions 骨架） |
 | `src/http_server.c` + `include/http_server.h` | HTTP 服务 | libmicrohttpd 守护进程，信号优雅退出 |
 | `src/routes.c` + `include/routes.h` | 路由 | /api/v1/* JSON API + 静态文件服务（防路径穿越） |
+| `src/ai_access.c` + `include/ai_access.h` | AI授权 | 复用共享SQLite连接查询权限，默认拒绝；增量建表不授权旧用户 |
 | `src/ai_client.c` + `include/ai_client.h` | AI 客户端 | libcurl 调用内部 Pi 任务接口（提交/查询/取消），不直接等待模型 |
 | `third_party/cJSON.*` | JSON 库 | 单文件 MIT 协议，随仓库分发 |
 | `tests/run_tests.sh` | 冒烟测试 | 启动 → 健康检查 → 静态页 → 关闭 |
@@ -84,7 +85,7 @@ hint 层级按成功轮次递增到3，失败/取消不升级；同对话不能�
 工具只核验输入数值，不证明模型列式、定义域或教学反馈正确。质量验收使用 `eval/fixtures.json` 的30个案例。
 前端契约见 [pi-chat-api.md](pi-chat-api.md)，部署和配置见 [../ai-service/README.md](../ai-service/README.md)。
 
-公共流程：用户登录 → C 读取题目 → POST /api/v1/chat 接受任务（202） →
+公共流程：用户登录 → GET /api/v1/ai/access 查询独立授权 → C 读取题目 → POST /api/v1/chat 接受任务（202） →
 GET /api/v1/chat/{job_id} 查询状态 → 展示 reply；DELETE 同一路径可取消。
 C 校验用户 token 并设置内部 user_id；内部服务凭证与用户 token 分离，模型 Key 配置在 Pi 服务环境中。
 
@@ -104,3 +105,5 @@ server 测试运行器只在 chat 组运行时启动临时 Pi Mock 进程，并�
 测试使用独立数据库，跳过本地 .env，不启动外部付费模型调用，不终止占用端口的其他服务。
 新增请求上下文在 MHD 完成回调统一释放，包含连接中断路径，最大请求体为 64 KiB。
 内部 HTTP 客户端限制响应大小、不跟随跳转并绕过外部代理。
+
+授权写入只开放可信服务器CLI，按用户绑定持久化并以事务追加审计；无HTTP写入口。每次POST重新检查，权限库故障默认拒绝；GET/DELETE本人既有任务不要求授权仍active。模型配置只由Pi进程读取，C仅持内部服务凭证。全部边界见 [ai-access.md](ai-access.md)。

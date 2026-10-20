@@ -1,6 +1,6 @@
 # Pi Agent 前端接口档案
 
-版本：1.1；日期：2026-10-14。适用于 C 主后端＋独立 Pi AI 服务。
+版本：1.2；日期：2026-10-20。适用于 C 主后端＋独立 Pi AI 服务。
 
 前端只调用 **C 后端的 `/api/v1/*`**。本机默认地址为 `http://localhost:8000`；
 其他机器联调时由后端负责人提供实际地址。Pi 内部端口、模型密钥和服务凭证不发送给前端。
@@ -12,11 +12,12 @@
 ## 1. 前端最短接入流程
 
 1. 调现有 `POST /api/v1/auth/login`，保存返回的用户 `token`。
-2. 调 `GET /api/v1/questions` 获取题目，使用返回的 id。
-3. 调 `POST /api/v1/chat` 提交题目和问题，得到 job_id、conversation_id。
-4. 每隔约 800 ms 调 `GET /api/v1/chat/{job_id}`，直到任务结束。
-5. 成功时展示 reply；同一道题追问时传 conversation_id。
-6. 用户取消时调用 `DELETE /api/v1/chat/{job_id}`。
+2. 调 `GET /api/v1/ai/access`；只有 allowed=true 才开放新任务发送。其他状态仍可浏览题目。
+3. 调 `GET /api/v1/questions` 获取题目，使用返回的 id。
+4. 调 `POST /api/v1/chat` 提交题目和问题，得到 job_id、conversation_id。
+5. 每隔约 800 ms 调 `GET /api/v1/chat/{job_id}`，直到任务结束。
+6. 成功时展示 reply；同一道题追问时传 conversation_id。
+7. 用户取消时调用 `DELETE /api/v1/chat/{job_id}`。
 
 请求头统一使用：
 
@@ -157,6 +158,8 @@ HTTP 200 返回任务对象。排队/运行中的任务变为 cancelled；已完
 | --- | --- | --- |
 | 400 | INVALID_REQUEST / INVALID_JSON | 检查字段和格式，保留用户输入 |
 | 401 | UNAUTHORIZED | 清理当前登录状态并提示重新登录 |
+| 403 | AI_ACCESS_REQUIRED / AI_ACCESS_REVOKED / AI_ACCESS_EXPIRED | 保留登录和输入，刷新权限，提示联系平台负责人；不自动重试 |
+| 503 | AI_ACCESS_UNAVAILABLE | 权限存储暂不可用，禁用新发送，保留登录并允许手动刷新 |
 | 404 | QUESTION_NOT_FOUND | 返回题目列表或提示题目不可用 |
 | 404 | JOB_NOT_FOUND / CONVERSATION_NOT_FOUND | 状态过期或资源不可访问；提示用户重新开始对话 |
 | 405 | METHOD_NOT_ALLOWED | 检查请求方法 |
@@ -191,7 +194,10 @@ HTTP 错误和 failed 任务都会停止当前客户端轮询；网络错误可�
 可以复制 `examples/pi-chat-client.mjs` 为 `web/js/pi-chat-client.js`，通过动态 import 引入：
 
 ```javascript
-const { sendPiChat } = await import('./pi-chat-client.js');
+const { sendPiChat, getPiAiAccess } = await import('./pi-chat-client.js');
+const access = await getPiAiAccess({ token: API.getToken() });
+setSendEnabled(access.allowed);
+if (!access.allowed) return; // 页面保留题目、登录和用户输入
 const result = await sendPiChat({
   questionId: currentQuestionId,
   message: text,
@@ -212,6 +218,9 @@ addMessage('ai', result.reply);
 
 ## 8. 前端联调验收
 
+- 默认未授权时禁用发送；授权后无需重新登录即可刷新为 active；自注册 admin 不获得 AI 权限。
+- 撤销/过期返回 403 时保留登录和输入；已有任务仍能查询/取消。
+- 权限查询 503 时不使用旧的 allowed=true 放行；接口返回 active 也要处理模型失败。
 - 登录后选题、提交、查询并展示后端回复，model=mock 时标明 Mock。
 - 同题追问复用 conversation_id，切换题目建立新对话。
 - 401 能提示重新登录，400/409 能保留输入并给出处理提示。
@@ -251,7 +260,7 @@ review 追问可以省略 mode，仍需传 student_answer（前端保留作答�
 对于可识别的单个数值候选和显式一元一次方程，后端会使用确定性代入反馈，请求学生补充过程；
 其他题型仍由模型处理。前端按同一reply文本字段展示，不需要另接工具接口。
 
-所有任务状态都增加 mode；仅 hint 增加 hint_level。旧调用不传新字段仍按 solve 工作，异步状态流程保持一致。
+所有任务状态都增加 mode；仅 hint 增加 hint_level。已授权用户的旧调用不传新字段仍按 solve 工作，异步状态流程保持一致。
 
 客户端示例：
 
@@ -267,3 +276,43 @@ const job = await sendPiChat({
 目前自动数学工具仅支持 a*x+b=c，模型需正确整理系数；数值校验不等于原题、单位、定义域全部核验通过。
 
 后端启动及真实模型配置见仓库 `ai-service/README.md`。此档案不含任何密钥。
+
+
+## 10. 统一 API 与独立 AI 授权（1.2 必接）
+
+**升级行为变化：所有账号默认没有 AI 使用权限。** 注册、登录、admin/teacher/student 角色，以及平台填好了 Key，都不等于有 AI 授权。后端负责人使用服务器 CLI 授予权限，前端无需接入授权写操作。
+
+```http
+GET /api/v1/ai/access
+Authorization: Bearer <用户登录 token>
+```
+
+```json
+{"ai_access":{"allowed":true,"status":"active","expires_at":"2026-12-31T23:59:59Z"}}
+```
+
+| status | allowed | 建议文案 |
+| --- | --- | --- |
+| not_granted | false | 账号尚未获得 AI 使用权限，请联系平台负责人 |
+| active | true | 可发送新的 AI 提问 |
+| revoked | false | AI 使用权限已撤销，请联系平台负责人 |
+| expired | false | AI 使用权限已到期，请联系平台负责人 |
+
+expires_at 为 UTC RFC3339 秒精度时间或 null；null 表示未设置到期时间，不等于已授权。revoked 可保留旧到期时间。以服务器状态为准，不用浏览器时间、角色或本地缓存计算授权。响应带 Cache-Control: no-store。200/active 只证明有权限，不能证明模型余额、Key、网络或模型当前可用。
+
+登录后、进入解题页及用户主动刷新时调用 getPiAiAccess。权限未知/查询失败时先禁用新发送；刷新成功再恢复。每次 POST 仍由服务器重新检查，预检查无法消除授权被撤销的竞态。403 要保存草稿、关闭当前发送状态并刷新权限；不要退出登录，不自动重试 POST，不切换在线 Mock。只有用户认证 401 才走重新登录流程。
+
+```javascript
+try {
+  const access = await getPiAiAccess({ token: API.getToken() });
+  renderAiAccess(access);
+  setSendEnabled(access.allowed);
+} catch (error) {
+  setSendEnabled(false);
+  showError(error.message); // 401 另按现有登录流程处理
+}
+```
+
+**撤销边界：** POST 新任务被阻止；已接受的排队/运行任务仍可完成；本人仍可 GET 查询和 DELETE 取消。不要因发送被禁用就清空 job_id 或停止已有任务的查询。跨用户始终不可访问。撤销不退款、不删除历史、不强制中断供应商调用；已通过授权检查的提交仍可能返回 202。
+
+前端只持有用户登录 token。模型 Key、内部服务 token、用户 ID、额度或授权状态都不能作为提交字段。一个 Pi 实例使用平台统一模型配置，本版不提供用户 Key 上传、用户额度/计费、授权管理页面或教师授权接口。完整运维步骤、部署和数据边界见 [ai-access.md](ai-access.md)。现有 web 页面需要前端同学按本档案接入；本次交付的是可运行客户端、接口契约和后端实现。

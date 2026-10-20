@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { sendPiChat } from '../../../docs/examples/pi-chat-client.mjs';
+import { execFileSync } from 'node:child_process';
+import { sendPiChat, getPiAiAccess } from '../../../docs/examples/pi-chat-client.mjs';
 
 const baseUrl = 'http://127.0.0.1:' + (process.env.TEST_PORT ?? '8099');
 const login = await fetch(baseUrl + '/api/v1/auth/login', {
@@ -8,6 +9,8 @@ const login = await fetch(baseUrl + '/api/v1/auth/login', {
 });
 assert.equal(login.status, 200);
 const { token } = await login.json();
+execFileSync('python3', ['../scripts/ai_access.py','--db',process.env.DATABASE_PATH,'grant','--username','student','--reason','frontend client regression fixture']);
+assert.equal((await getPiAiAccess({ token, baseUrl })).allowed, true);
 const headers = { Authorization: 'Bearer ' + token };
 const { questions } = await (await fetch(baseUrl + '/api/v1/questions', { headers })).json();
 const states = [];
@@ -36,6 +39,12 @@ assert.equal(reviewed.mode, 'review');
 const reviewedAgain = await sendPiChat({ questionId: questions[0].id, message: '再检查',
   conversationId: reviewed.conversation_id, studentAnswer: 'x=4', token, baseUrl, pollMs: 20 });
 assert.equal(reviewedAgain.mode, 'review');
+execFileSync('python3', ['../scripts/ai_access.py','--db',process.env.DATABASE_PATH,'revoke','--username','student','--reason','frontend 403 regression fixture']);
+assert.equal((await getPiAiAccess({ token, baseUrl })).status, 'revoked');
+await assert.rejects(sendPiChat({ questionId: questions[0].id, message: '权限已撤销', token, baseUrl }),
+  error => error.status === 403 && error.code === 'AI_ACCESS_REVOKED');
+assert.equal((await (await fetch(baseUrl + '/api/v1/auth/me', { headers })).json()).user.role, 'student');
+execFileSync('python3', ['../scripts/ai_access.py','--db',process.env.DATABASE_PATH,'grant','--username','student','--reason','restore frontend cancel fixture']);
 const controller = new AbortController();
 await assert.rejects(sendPiChat({ questionId: questions[0].id, message: '测试取消', token,
   baseUrl, pollMs: 20, signal: controller.signal,

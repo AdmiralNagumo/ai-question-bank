@@ -7,7 +7,7 @@
 
 ## WSL 本地启动
 
-需要 C 后端既有开发库、Python 3（测试用）与 Node >=22.19。
+需要 C 后端既有开发库、Python 3（测试及授权CLI）与 Node >=22.19。
 本项目提供用户目录安装脚本，不替换系统 Node：
 
 ```bash
@@ -26,6 +26,15 @@ make -C ai-service run
 ```bash
 make -C server run
 ```
+
+C启动后，在仓库根目录显式给联调账号授权（确认db是C正在使用的DATABASE_PATH）：
+
+```bash
+python3 scripts/ai_access.py --db server/data/ai_question_bank.db status --username student
+python3 scripts/ai_access.py --db server/data/ai_question_bank.db grant --username student --expires-at 2026-12-31T23:59:59Z --reason "受控联调"
+```
+
+所有角色默认无AI授权；配置模型Key、登录成功均不会自动授权。CLI需要可信服务器权限，不能交由前端调用。撤销/到期只阻止新提交，已有本人任务仍可查询/取消。授权保存在SQLite，详细边界及回退要求见 [../docs/ai-access.md](../docs/ai-access.md)。本版不含用户额度、收费和授权管理UI。
 
 C 默认 `http://localhost:8000`，Pi 默认只监听 `127.0.0.1:8001`。
 演示配置脚本产生随机的内部服务凭证，保存到被 Git 忽略的 .env 中，不打印凭证。
@@ -48,7 +57,7 @@ AI_API_KEY=你的 API Key
 当前实现使用兼容 Chat Completions 的流式模型协议。AI_API_BASE_URL 是基础路径，
 SDK 会调用其 `/chat/completions`；供应商要求 `/v1` 时在 base 中包含 `/v1`。
 模型 Key 仅由 Pi 服务持有。服务凭证与用户登录 token 分别校验；C 内部请求绕过代理且不跟随跳转。
-本次验证使用离线 Faux 模型与本地兼容模型 HTTP 测试服务；真实外部供应商需你提供 API Key 后联调。
+自动回归使用Mock与本地兼容HTTP模型，不消耗真实模型额度。先前V4.1-Flash真实验证记录见 `docs/pi-chat-evaluation.md`；该记录不能替代上线后的人工质量检查。一个Pi实例使用一套平台模型配置，不接受客户端或用户个人Key。
 
 ## 模块和限制
 

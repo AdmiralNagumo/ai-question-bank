@@ -96,6 +96,8 @@ mkdir -p "$AQB_TEST_BIN_DIR"
 # 格式：test_name|编译命令
 # 每次新增 C 测试源文件时，在此添加一行即可。
 COMPILE_RULES=(
+    "session_entropy_unit|gcc -std=c11 -Iinclude -O0 -Wall -Wextra tests/ai_access/case_unit_session.c src/auth.c -Wl,--wrap=RAND_bytes -lcrypto -o ${AQB_TEST_BIN_DIR}/session_entropy_unit"
+    "ai_access_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/ai_access/case_unit.c src/ai_access.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/ai_access_unit"
     "chat_proxy|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/chat/case_unit_proxy.c src/ai_client.c third_party/cJSON.c -lcurl -lm -o ${AQB_TEST_BIN_DIR}/chat_proxy"
     "kv_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/kv/case_unit.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/kv_unit"
 )
@@ -261,7 +263,7 @@ echo ""
 
 
 # Pi 仅在 chat 集成组运行时启动；Mock 走真实 Pi Agent，不访问外部模型。
-if [[ " ${DIRS[*]} " == *" chat "* ]]; then
+if [[ " ${DIRS[*]} " == *" chat "* || " ${DIRS[*]} " == *" ai_access "* ]]; then
     AI_NODE=$(bash ../scripts/find_ai_node.sh)
     make -C ../ai-service build
     export AI_SERVICE_TOKEN

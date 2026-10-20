@@ -9,10 +9,12 @@
 #include <strings.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <time.h>
 
 #include <microhttpd.h>
 
 #include "ai_client.h"
+#include "ai_access.h"
 #include "auth.h"
 #include "cJSON.h"
 #include "config.h"
@@ -567,9 +569,37 @@ static enum MHD_Result chat_method_error(struct MHD_Connection *conn, const char
     if (response == NULL) return MHD_NO;
     MHD_add_response_header(response, "Content-Type", "application/json; charset=utf-8");
     MHD_add_response_header(response, "Allow", allowed);
+    MHD_add_response_header(response, "Cache-Control", "no-store");
     enum MHD_Result ret = MHD_queue_response(conn, 405, response);
     MHD_destroy_response(response);
     return ret;
+}
+
+static enum MHD_Result handle_ai_access(struct MHD_Connection *conn, const char *method, const AppConfig *cfg) {
+    const char *authorization = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
+    Session *session = session_validate(extract_bearer_token(authorization));
+    if (session == NULL) return chat_error(conn, 401, "UNAUTHORIZED", "未登录或 token 已过期");
+    if (strcmp(method, "GET") != 0) return chat_method_error(conn, "GET");
+    AiAccess access;
+    time_t now = time(NULL);
+    if (now < 0 || ai_access_get(cfg->db, session->user_id, (sqlite3_int64)now, &access) != 0)
+        return chat_error(conn, 503, "AI_ACCESS_UNAVAILABLE", "AI 授权暂时无法核验，请稍后重试");
+    cJSON *root = cJSON_CreateObject();
+    cJSON *value = root != NULL ? cJSON_AddObjectToObject(root, "ai_access") : NULL;
+    int valid = value != NULL && cJSON_AddBoolToObject(value, "allowed", access.status == AI_ACCESS_ACTIVE) != NULL &&
+        cJSON_AddStringToObject(value, "status", ai_access_status_name(access.status)) != NULL;
+    if (valid && access.has_expiry) {
+        char timestamp[32]; struct tm utc;
+        time_t expiry = (time_t)access.expires_at;
+        valid = (sqlite3_int64)expiry == access.expires_at && gmtime_r(&expiry, &utc) != NULL &&
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc) > 0;
+        if (valid) valid = cJSON_AddStringToObject(value, "expires_at", timestamp) != NULL;
+    } else if (valid) valid = cJSON_AddNullToObject(value, "expires_at") != NULL;
+    char *json = valid ? cJSON_PrintUnformatted(root) : NULL;
+    cJSON_Delete(root);
+    if (json == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "服务器内部错误");
+    enum MHD_Result result = reply_json(conn, 200, json);
+    cJSON_free(json); return result;
 }
 
 static int chat_contains_null_escape(const char *body, size_t length) {
@@ -631,6 +661,12 @@ static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
     char path[96] = "/internal/v1/jobs";
     char *payload = NULL;
     if (submit) {
+        AiAccess entitlement;
+        time_t now = time(NULL);
+        if (now < 0 || ai_access_get(cfg->db, session->user_id, (sqlite3_int64)now, &entitlement) != 0)
+            return chat_error(conn, 503, "AI_ACCESS_UNAVAILABLE", "AI 授权暂时无法核验，请稍后重试");
+        if (entitlement.status != AI_ACCESS_ACTIVE)
+            return chat_error(conn, 403, ai_access_error_code(entitlement.status), "当前账号未获有效 AI 授权，请联系平台负责人");
         const char *media_type = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Content-Type");
         if (media_type == NULL || strncasecmp(media_type, "application/json", 16) != 0 ||
             (media_type[16] != '\0' && media_type[16] != ';')) {
@@ -790,6 +826,7 @@ enum MHD_Result route_dispatch(struct MHD_Connection *conn, const char *url,
     }
 
     /* 只匹配题目列表及详情路径；沿用现有会话校验。 */
+    if (strcmp(url, "/api/v1/ai/access") == 0) return handle_ai_access(conn, method, cfg);
     if (strcmp(url, "/api/v1/questions") == 0 ||
         strncmp(url, "/api/v1/questions/", sizeof("/api/v1/questions/") - 1) == 0) {
         return handle_questions(conn, url, method, cfg);

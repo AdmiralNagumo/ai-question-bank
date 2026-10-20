@@ -6,6 +6,7 @@
 #include "db.h"
 #include "http_server.h"
 #include "kv_store.h"
+#include "ai_access.h"
 
 int main(void) {
     AppConfig cfg = config_load();
@@ -48,6 +49,10 @@ int main(void) {
     }
 
     printf("✔ 数据库就绪: %s\n", cfg.db_path);
+    if (ai_access_init(cfg.db) != 0) {
+        fprintf(stderr, "✘ AI 授权存储初始化失败\n");
+        sqlite3_close(cfg.db); return 1;
+    }
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
         sqlite3_close(cfg.db); return 1;
