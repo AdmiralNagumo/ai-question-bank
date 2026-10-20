@@ -65,6 +65,8 @@ DATABASE_PATH=data/ai_question_bank.db
 WEB_ROOT=../web                 # 静态页根目录（相对 server/ 工作目录）
 AI_SERVICE_URL=http://127.0.0.1:8001   # C只访问内部Pi服务
 AI_SERVICE_TOKEN=                   # C与Pi共享内部凭证，与用户token不同
+AI_CONNECT_TIMEOUT_MS=500           # 内部HTTP连接超时，毫秒
+AI_REQUEST_TIMEOUT_MS=2000          # 内部HTTP总超时（含连接），毫秒
 ```
 
 模型的 `AI_API_BASE_URL / AI_MODEL / AI_API_KEY` 仅配置在 Pi 服务环境；C不再读取这些旧变量。

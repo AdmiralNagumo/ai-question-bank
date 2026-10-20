@@ -79,8 +79,8 @@ int ai_service_request(const AppConfig *cfg, const char *method, const char *pat
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 500L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 2000L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, cfg->ai_connect_timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, cfg->ai_request_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_PROXY, ""); /* 内部请求绕过系统代理，避免服务凭证外泄。 */
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
@@ -102,10 +102,20 @@ int ai_service_request(const AppConfig *cfg, const char *method, const char *pat
             "{\"error\":\"服务器内部错误\",\"code\":\"INTERNAL_ERROR\"}");
         if (response.too_large) return failure(out_json, 502,
             "{\"error\":\"AI 服务返回内容过长\",\"code\":\"AI_INVALID_RESPONSE\"}");
+        const char *reason = result == CURLE_OPERATION_TIMEDOUT ? "request_timeout" :
+            (result == CURLE_COULDNT_CONNECT || result == CURLE_COULDNT_RESOLVE_HOST) ? "connect_failed" : "transport_failed";
+        /* 只记固定分类和数字，不记录URL、请求头、凭证或供应商响应。 */
+        fprintf(stderr, "[ai-client] %s (curl_code=%d)\n", reason, (int)result);
         if (result == CURLE_OPERATION_TIMEDOUT) return failure(out_json, 504,
             "{\"error\":\"AI 服务连接超时\",\"code\":\"AI_SERVICE_TIMEOUT\"}");
         return failure(out_json, 503,
             "{\"error\":\"AI 服务暂时不可用\",\"code\":\"AI_SERVICE_UNAVAILABLE\"}");
+    }
+    if (status == 401) {
+        fprintf(stderr, "[ai-client] internal_auth_failed: Pi returned HTTP 401; check AI_SERVICE_TOKEN on both services\n");
+        free(response.data);
+        return failure(out_json, 503,
+            "{\"error\":\"AI 服务凭证配置不正确\",\"code\":\"AI_SERVICE_UNAVAILABLE\"}");
     }
     cJSON *json = response.data != NULL ? cJSON_ParseWithOpts(response.data, NULL, 1) : NULL;
     int valid = cJSON_IsObject(json) && ((status >= 400 && status <= 599) || status == 200 || status == 202);
@@ -139,11 +149,6 @@ int ai_service_request(const AppConfig *cfg, const char *method, const char *pat
             "{\"error\":\"AI 服务返回格式不正确\",\"code\":\"AI_INVALID_RESPONSE\"}");
     }
     cJSON_Delete(json);
-    if (status == 401) {
-        free(response.data);
-        return failure(out_json, 503,
-            "{\"error\":\"AI 服务凭证配置不正确\",\"code\":\"AI_SERVICE_UNAVAILABLE\"}");
-    }
     *out_json = response.data;
     return (int)status;
 }

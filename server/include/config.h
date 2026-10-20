@@ -3,6 +3,10 @@
 
 #include <sqlite3.h>
 
+#define AI_CONNECT_TIMEOUT_MS_DEFAULT 500L
+#define AI_REQUEST_TIMEOUT_MS_DEFAULT 2000L
+#define AI_SERVICE_TIMEOUT_MS_MAX 60000L
+
 /* 应用配置：从环境变量加载（未设置时使用默认值）。
  * systemd 部署时由 EnvironmentFile 加载 server/.env 注入。 */
 typedef struct {
@@ -15,6 +19,8 @@ typedef struct {
     const char *web_root;    /* 静态前端根目录，相对 server/ 工作目录（WEB_ROOT） */
     const char *ai_service_url;   /* AI_SERVICE_URL：内部 Pi 服务地址 */
     const char *ai_service_token; /* AI_SERVICE_TOKEN：内部服务凭证 */
+    long ai_connect_timeout_ms;  /* AI_CONNECT_TIMEOUT_MS：1–60000，默认500 */
+    long ai_request_timeout_ms;  /* AI_REQUEST_TIMEOUT_MS：1–60000，默认2000；包含连接 */
 } AppConfig;
 
 AppConfig config_load(void);

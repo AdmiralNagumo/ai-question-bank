@@ -148,6 +148,10 @@ curl http://localhost:8000/api/v1/health   # → {"status":"ok"}
 | `WEB_ROOT` | 静态文件根目录 | `../web`（相对 server/ 工作目录） |
 | `AI_SERVICE_URL` | C访问内部Pi的地址 | `http://127.0.0.1:8001` |
 | `AI_SERVICE_TOKEN` | C/Pi共享服务凭证 | 空（启动Pi联调前配置） |
+| `AI_CONNECT_TIMEOUT_MS` | 内部HTTP连接超时，整数1–60000毫秒 | `500` |
+| `AI_REQUEST_TIMEOUT_MS` | 内部HTTP总超时（含连接），整数1–60000毫秒 | `2000` |
+
+C内部HTTP超时仅接受1–60000毫秒整数，非法值回退默认并脱敏记录；修改需重启C，总请求预算包含连接，不能代替Pi模型任务AI_TIMEOUT_MS。诊断日志分类和单线程等待边界见architecture.md的“C → Pi 内部请求超时与诊断”。
 
 模型变量AI_API_BASE_URL/AI_MODEL/AI_API_KEY仅由ai-service读取，完整配置见其.env.example。所有账号默认无AI授权；scripts/ai_access.py是可信运维写入口，不可根据用户role=admin开放HTTP授权写入。接口和边界见pi-chat-api.md（1.2）、ai-access.md。
 

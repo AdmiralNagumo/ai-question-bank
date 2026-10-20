@@ -107,3 +107,12 @@ server 测试运行器只在 chat 组运行时启动临时 Pi Mock 进程，并�
 内部 HTTP 客户端限制响应大小、不跟随跳转并绕过外部代理。
 
 授权写入只开放可信服务器CLI，按用户绑定持久化并以事务追加审计；无HTTP写入口。每次POST重新检查，权限库故障默认拒绝；GET/DELETE本人既有任务不要求授权仍active。模型配置只由Pi进程读取，C仅持内部服务凭证。全部边界见 [ai-access.md](ai-access.md)。
+
+
+## C → Pi 内部请求超时与诊断（2026-10-21）
+
+C从进程环境或server/.env读取AI_CONNECT_TIMEOUT_MS（默认500）和AI_REQUEST_TIMEOUT_MS（默认2000），单位毫秒，允许纯十进制整数1–60000。未设置或空字符串使用默认；零、负数、带符号/空白、小数、非数字、溢出或超范围值回退到该项默认，并只记录变量名与默认值，不记录原始输入。进程环境优先，修改后重启C生效。
+
+总请求超时包含连接阶段；两项独立校验，连接阶段受两者较小值约束。这些设置只控制C提交/查询/取消内部HTTP请求，与Pi后台模型任务的AI_TIMEOUT_MS不同，不能用延长内部HTTP超时来延长模型推理时间。C当前是单轮询线程；大幅提高内部超时会延长故障期间其他请求等待时间，应按部署延迟保守调整。
+
+C标准错误日志以[ai-client]标识分类：connect_failed表示无法连接/解析内部服务；request_timeout表示内部HTTP超时；transport_failed表示其他传输故障；internal_auth_failed表示Pi返回HTTP401，应核对C/Pi两侧AI_SERVICE_TOKEN。仅记录固定分类、curl数字错误码或HTTP401，不记录URL、请求头、token、用户输入或上游响应。内部401即使响应非JSON也转为脱敏503 AI_SERVICE_UNAVAILABLE；连接失败仍503，超时仍504 AI_SERVICE_TIMEOUT。公共API字段及前端1.2契约不变。

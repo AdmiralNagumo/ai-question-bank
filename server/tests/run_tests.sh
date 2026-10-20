@@ -98,7 +98,7 @@ mkdir -p "$AQB_TEST_BIN_DIR"
 COMPILE_RULES=(
     "session_entropy_unit|gcc -std=c11 -Iinclude -O0 -Wall -Wextra tests/ai_access/case_unit_session.c src/auth.c -Wl,--wrap=RAND_bytes -lcrypto -o ${AQB_TEST_BIN_DIR}/session_entropy_unit"
     "ai_access_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/ai_access/case_unit.c src/ai_access.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/ai_access_unit"
-    "chat_proxy|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/chat/case_unit_proxy.c src/ai_client.c third_party/cJSON.c -lcurl -lm -o ${AQB_TEST_BIN_DIR}/chat_proxy"
+    "chat_proxy|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/chat/case_unit_proxy.c src/ai_client.c src/config.c third_party/cJSON.c -lcurl -lm -o ${AQB_TEST_BIN_DIR}/chat_proxy"
     "kv_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/kv/case_unit.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/kv_unit"
 )
 
