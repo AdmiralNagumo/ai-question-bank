@@ -25,3 +25,5 @@
 
 # 构建 / CI / 脚本
 # /scripts/ /Makefile /deploy/ @ci-owner-github-username
+
+docs @peace-cherry
