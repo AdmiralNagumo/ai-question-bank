@@ -23,7 +23,8 @@
 | 模块 | 技术 | 说明 |
 |------|------|------|
 | 后端 | **C11** · libmicrohttpd · SQLite3 · libcurl · cJSON | HTTP 服务 + 存储 + AI 代理（API Key 不出后端） |
-| 存储层 | db.c（SQL 关系表）+ **kv_store**（目录式 KV） | users 等关系表走 SQL；题目等目录式数据走 kv_store，namespace 映射独立表 `kv_{ns}`（见 `kvstore.md`） |
+| 存储层 | db.c（SQL 关系表）+ **kv_store**（目录式 KV） | 当前users/questions走KV；namespace实际映射同名表（users/questions），旧文档的kv_前缀不适用于现实现。AI授权/审计为专用关系表 |
+| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，平台模型Key仅Pi持有 |
 | 前端 | 纯 HTML / CSS / JS | 静态页面，由 C 服务端直接托管，无构建工具链 |
 | 构建 | GNU Make + gcc | `-std=c11 -Wall -Wextra`，零警告编译 |
 | 部署 | systemd（Linux 服务器） | 见 `environment-setup.md` |
@@ -64,7 +65,7 @@ ai-question-bank/
 │   │   ├── routes.c            # /api/v1/* JSON API + 静态文件服务
 │   │   ├── ai_client.c         # AI API 代理调用（libcurl）
 │   │   ├── auth.c              # 认证鉴权实现
-│   │   └── kv_store.c          # 目录式键值存储实现（namespace → kv_{ns} 表）
+│   │   └── kv_store.c          # 目录式键值存储实现（namespace → 同名表）
 │   ├── third_party/            # cJSON（MIT 协议，单文件库：cJSON.c + cJSON.h）
 │   └── tests/                  # 测试（run_tests.sh 自动发现测试组）
 │       ├── run_tests.sh        # 测试入口：自动遍历 auth/health/questions/kv 四组
@@ -117,7 +118,7 @@ bash scripts/check_env.sh
 sudo bash scripts/install_env.sh   # gcc make libmicrohttpd-dev libcurl4-openssl-dev libsqlite3-dev
 
 # 构建
-make build          # 编译 server/
+make build          # 编译 server/ 和 ai-service/；需先make -C ai-service install
 make test           # 测试（run_tests.sh 自动发现 auth/health/questions/kv 测试组）
 make lint           # 静态检查
 
@@ -145,9 +146,14 @@ curl http://localhost:8000/api/v1/health   # → {"status":"ok"}
 | `PORT` | 监听端口 | `8000` |
 | `DATABASE_PATH` | SQLite 数据库路径 | `data/ai_question_bank.db` |
 | `WEB_ROOT` | 静态文件根目录 | `../web`（相对 server/ 工作目录） |
-| `AI_API_BASE_URL` | 大模型 API 地址 | `https://api.openai.com/v1` |
-| `AI_API_KEY` | API Key | 空（必须填写） |
-| `AI_MODEL` | 模型名称 | `gpt-4o-mini` |
+| `AI_SERVICE_URL` | C访问内部Pi的地址 | `http://127.0.0.1:8001` |
+| `AI_SERVICE_TOKEN` | C/Pi共享服务凭证 | 空（启动Pi联调前配置） |
+| `AI_CONNECT_TIMEOUT_MS` | 内部HTTP连接超时，整数1–60000毫秒 | `500` |
+| `AI_REQUEST_TIMEOUT_MS` | 内部HTTP总超时（含连接），整数1–60000毫秒 | `2000` |
+
+C内部HTTP超时仅接受1–60000毫秒整数，非法值回退默认并脱敏记录；修改需重启C，总请求预算包含连接，不能代替Pi模型任务AI_TIMEOUT_MS。诊断日志分类和单线程等待边界见architecture.md的“C → Pi 内部请求超时与诊断”。
+
+模型变量AI_API_BASE_URL/AI_MODEL/AI_API_KEY仅由ai-service读取，完整配置见其.env.example。所有账号默认无AI授权；scripts/ai_access.py是可信运维写入口，不可根据用户role=admin开放HTTP授权写入。接口和边界见pi-chat-api.md（1.2）、ai-access.md。
 
 生产部署：复制 `server/.env.example` → `server/.env`，systemd 通过 `EnvironmentFile` 加载。
 
@@ -163,7 +169,7 @@ gcc -std=c11 -Wall -Wextra  → 零警告
 
 - 所有源文件必须在 `server/Makefile` 的 `SRCS` 变量中登记
 - 新增头文件放 `server/include/`，源文件放 `server/src/`
-- 链接库：libmicrohttpd / libcurl / libsqlite3 / libpthread / libm
+- 链接库：libmicrohttpd / libcurl / libsqlite3 / libpthread / libm / libcrypto（会话使用RAND_bytes，随机源失败拒绝登录）
 
 ### 5.2 命名约定
 
@@ -359,6 +365,7 @@ main（受保护） ← PR（Squash merge） ← feat/fix/docs/... 分支
 | 后端-题库 | 李俊熠 | 题目 CRUD 路由（只读接口已接入 kv_store）, `db.c` 扩展 |
 | 后端-审核/通知 | 牛宇歌 | 内容审核、通知中心（P2），配合其他后端模块 |
 | 后端-安全/测试/架构 | 卢恒毅 | 代码审查、测试体系、CI、安全审计 |
+| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，平台模型Key仅Pi持有 |
 | 前端 | 曹渲东、王英杰 | `web/` 全部 |
 | 文档/接口 | 戴儒骋 | `AGENT.md`、`api.md`、功能说明书 |
 
@@ -369,3 +376,12 @@ main（受保护） ← PR（Squash merge） ← feat/fix/docs/... 分支
 ---
 
 > **AI Agent 使用提醒**：生成代码前，请完整阅读本文件 + `server/Makefile` + 相关头文件（`server/include/*.h`）；涉及数据存储时必读 `docs/kvstore.md`。确保输出满足 C11 零警告、内存安全（含 kv_* 返回值释放）、API 签名一致、安全红线不触碰。
+
+## Pi与AI授权新增文件（2026-10-20）
+
+- ai-service/：独立Node/TS模块、固定Pi依赖，src/、skills/、eval/，提供Make lint/build/test/run。
+- server/src/ai_access.c、include/ai_access.h：授权读与建表，不在routes中写SQL，不开额外C数据库连接。
+- scripts/ai_access.py：可信运维授权/撤销/状态，事务审计。
+- server/tests/ai_access/：C权限单元、会话随机源失败和HTTP+CLI集成；chat测试显式授权自己的临时库，禁止依赖真实.env。
+- docs/pi-chat-api.md、pi-chat-openapi.json、examples/pi-chat-client.mjs、ai-access.md：前端1.2契约与边界。
+- 根make lint/build/test同时覆盖C与Pi；单跑C可make -C server lint build test。

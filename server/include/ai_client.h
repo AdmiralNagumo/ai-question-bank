@@ -3,9 +3,10 @@
 
 #include "config.h"
 
-/* 调用大模型生成解答（OpenAI 兼容协议，libcurl 实现）。
- * 框架阶段为预留接口（返回 -1 未实现）；功能开发阶段在
- * src/ai_client.c 中完成实现。 */
-int ai_completion(const AppConfig *cfg, const char *prompt, char *out, size_t out_len);
+/* 调用独立 Pi 服务。path 仅由后端构造，user_id 来自已验证会话。
+ * 返回公共 HTTP 状态码，out_json 由 malloc 分配，调用者 free()。
+ * C 只提交/查询任务，不等待模型完成。 */
+int ai_service_request(const AppConfig *cfg, const char *method, const char *path,
+                       int user_id, const char *body, char **out_json);
 
-#endif /* AIQB_AI_CLIENT_H */
+#endif

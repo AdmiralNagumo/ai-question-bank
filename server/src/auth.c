@@ -5,6 +5,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <openssl/rand.h>
 
 #include "auth.h"
 
@@ -47,13 +48,17 @@ static void session_cleanup(void) {
     g_session_count = write_idx;
 }
 
-/* 生成随机十六进制 token（用 rand()，demo 够用） */
-static void generate_token(char *buf, size_t len) {
+/* AI授权依赖会话身份，使用密码学随机数；随机源失败时拒绝创建。 */
+static int generate_token(char *buf, size_t len) {
     static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < len - 1; i++) {
-        buf[i] = hex[rand() % 16];
+    unsigned char bytes[SESSION_TOKEN_LEN / 2];
+    if (len != SESSION_TOKEN_LEN + 1 || RAND_bytes(bytes, sizeof(bytes)) != 1) return -1;
+    for (size_t i = 0; i < sizeof(bytes); i++) {
+        buf[i * 2] = hex[bytes[i] >> 4];
+        buf[i * 2 + 1] = hex[bytes[i] & 15];
     }
     buf[len - 1] = '\0';
+    return 0;
 }
 
 const char *session_create(int user_id, const char *role, const char *name) {
@@ -70,10 +75,10 @@ const char *session_create(int user_id, const char *role, const char *name) {
     }
 
     Session *s = &g_sessions[g_session_count];
-    generate_token(s->token, sizeof(s->token));
-
-    /* 确保唯一性（极低概率碰撞，简单重试） */
+    /* 确保唯一性；耗尽重试或随机源失败不得返回可预测的token。 */
+    bool unique = false;
     for (int retry = 0; retry < 5; retry++) {
+        if (generate_token(s->token, sizeof(s->token)) != 0) return NULL;
         bool collision = false;
         for (int i = 0; i < g_session_count; i++) {
             if (g_sessions[i].active &&
@@ -82,9 +87,9 @@ const char *session_create(int user_id, const char *role, const char *name) {
                 break;
             }
         }
-        if (!collision) break;
-        generate_token(s->token, sizeof(s->token));
+        if (!collision) { unique = true; break; }
     }
+    if (!unique) return NULL;
 
     s->user_id    = user_id;
     s->expires_at = time(NULL) + 86400;  /* 24 小时后过期 */

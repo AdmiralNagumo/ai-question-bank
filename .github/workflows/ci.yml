@@ -14,6 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: ai-service/package-lock.json
+      - name: Pi 依赖安装、类型检查和单元测试
+        run: make -C ai-service install lint test
       - name: 安装系统依赖
         run: sudo apt-get update && sudo apt-get install -y libmicrohttpd-dev libcurl4-openssl-dev libsqlite3-dev
       - name: 静态检查（-fsyntax-only）

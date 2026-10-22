@@ -9,9 +9,12 @@
 #include <strings.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <time.h>
 
 #include <microhttpd.h>
 
+#include "ai_client.h"
+#include "ai_access.h"
 #include "auth.h"
 #include "cJSON.h"
 #include "config.h"
@@ -66,6 +69,7 @@ static enum MHD_Result reply_json(struct MHD_Connection *conn, unsigned int code
         strlen(json), (void *)json, MHD_RESPMEM_MUST_COPY);
     if (resp == NULL) return MHD_NO;
     MHD_add_response_header(resp, "Content-Type", "application/json; charset=utf-8");
+    MHD_add_response_header(resp, "Cache-Control", "no-store");
     enum MHD_Result ret = MHD_queue_response(conn, code, resp);
     MHD_destroy_response(resp);
     return ret;
@@ -530,6 +534,199 @@ static enum MHD_Result handle_questions(struct MHD_Connection *conn,
     }
 }
 
+
+/* ── Pi 异步解答接口：由 C 验证身份和读取题目，Node 执行模型任务 ── */
+static enum MHD_Result chat_error(struct MHD_Connection *conn, unsigned int status,
+                                  const char *code, const char *message) {
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL || cJSON_AddStringToObject(root, "error", message) == NULL ||
+        cJSON_AddStringToObject(root, "code", code) == NULL) {
+        cJSON_Delete(root);
+        return reply_json(conn, 500, "{\"error\":\"服务器内部错误\",\"code\":\"INTERNAL_ERROR\"}");
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) return reply_json(conn, 500, "{\"error\":\"服务器内部错误\",\"code\":\"INTERNAL_ERROR\"}");
+    enum MHD_Result ret = reply_json(conn, status, json);
+    cJSON_free(json);
+    return ret;
+}
+
+static int chat_uuid_valid(const char *value) {
+    if (value == NULL || strlen(value) != 36) return 0;
+    for (size_t i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return 0;
+        } else if (!((value[i] >= '0' && value[i] <= '9') ||
+                     (value[i] >= 'a' && value[i] <= 'f'))) return 0;
+    }
+    return value[14] == '4' && strchr("89ab", value[19]) != NULL;
+}
+
+static enum MHD_Result chat_method_error(struct MHD_Connection *conn, const char *allowed) {
+    const char *json = "{\"error\":\"请求方法不支持\",\"code\":\"METHOD_NOT_ALLOWED\"}";
+    struct MHD_Response *response = MHD_create_response_from_buffer(strlen(json), (void *)json, MHD_RESPMEM_PERSISTENT);
+    if (response == NULL) return MHD_NO;
+    MHD_add_response_header(response, "Content-Type", "application/json; charset=utf-8");
+    MHD_add_response_header(response, "Allow", allowed);
+    MHD_add_response_header(response, "Cache-Control", "no-store");
+    enum MHD_Result ret = MHD_queue_response(conn, 405, response);
+    MHD_destroy_response(response);
+    return ret;
+}
+
+static enum MHD_Result handle_ai_access(struct MHD_Connection *conn, const char *method, const AppConfig *cfg) {
+    const char *authorization = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
+    Session *session = session_validate(extract_bearer_token(authorization));
+    if (session == NULL) return chat_error(conn, 401, "UNAUTHORIZED", "未登录或 token 已过期");
+    if (strcmp(method, "GET") != 0) return chat_method_error(conn, "GET");
+    AiAccess access;
+    time_t now = time(NULL);
+    if (now < 0 || ai_access_get(cfg->db, session->user_id, (sqlite3_int64)now, &access) != 0)
+        return chat_error(conn, 503, "AI_ACCESS_UNAVAILABLE", "AI 授权暂时无法核验，请稍后重试");
+    cJSON *root = cJSON_CreateObject();
+    cJSON *value = root != NULL ? cJSON_AddObjectToObject(root, "ai_access") : NULL;
+    int valid = value != NULL && cJSON_AddBoolToObject(value, "allowed", access.status == AI_ACCESS_ACTIVE) != NULL &&
+        cJSON_AddStringToObject(value, "status", ai_access_status_name(access.status)) != NULL;
+    if (valid && access.has_expiry) {
+        char timestamp[32]; struct tm utc;
+        time_t expiry = (time_t)access.expires_at;
+        valid = (sqlite3_int64)expiry == access.expires_at && gmtime_r(&expiry, &utc) != NULL &&
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc) > 0;
+        if (valid) valid = cJSON_AddStringToObject(value, "expires_at", timestamp) != NULL;
+    } else if (valid) valid = cJSON_AddNullToObject(value, "expires_at") != NULL;
+    char *json = valid ? cJSON_PrintUnformatted(root) : NULL;
+    cJSON_Delete(root);
+    if (json == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "服务器内部错误");
+    enum MHD_Result result = reply_json(conn, 200, json);
+    cJSON_free(json); return result;
+}
+
+static int chat_contains_null_escape(const char *body, size_t length) {
+    for (size_t i = 0; i + 1 < length; i++) {
+        if (body[i] != '\\') continue;
+        if (i + 5 < length && memcmp(body + i + 1, "u0000", 5) == 0) return 1;
+        i++; /* 跳过完整转义；\\\\u0000 是普通文字，不是 NUL。 */
+    }
+    return 0;
+}
+
+static int chat_text_valid(cJSON *value) {
+    if (!cJSON_IsString(value)) return 0;
+    size_t characters = 0;
+    int nonspace = 0;
+    for (const unsigned char *p = (const unsigned char *)value->valuestring; *p; p++) {
+        if ((*p & 0xc0) != 0x80) characters++;
+        if (!isspace(*p)) nonspace = 1;
+    }
+    return nonspace && characters <= 4000;
+}
+
+static int chat_fields_valid(cJSON *root) {
+    if (!cJSON_IsObject(root)) return 0;
+    for (cJSON *field = root->child; field != NULL; field = field->next) {
+        if (strcmp(field->string, "question_id") != 0 && strcmp(field->string, "message") != 0 &&
+            strcmp(field->string, "conversation_id") != 0 && strcmp(field->string, "mode") != 0 &&
+            strcmp(field->string, "student_answer") != 0) return 0;
+        for (cJSON *previous = root->child; previous != field; previous = previous->next) {
+            if (strcmp(previous->string, field->string) == 0) return 0;
+        }
+    }
+    cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "question_id");
+    cJSON *message = cJSON_GetObjectItemCaseSensitive(root, "message");
+    cJSON *conversation = cJSON_GetObjectItemCaseSensitive(root, "conversation_id");
+    cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    cJSON *answer = cJSON_GetObjectItemCaseSensitive(root, "student_answer");
+    if (!cJSON_IsNumber(id) || id->valueint <= 0 || (double)id->valueint != id->valuedouble ||
+        !chat_text_valid(message)) return 0;
+    if (mode != NULL && (!cJSON_IsString(mode) ||
+        (strcmp(mode->valuestring, "solve") != 0 && strcmp(mode->valuestring, "hint") != 0 &&
+         strcmp(mode->valuestring, "review") != 0))) return 0;
+    if (answer != NULL && !chat_text_valid(answer)) return 0;
+    if (mode != NULL && ((strcmp(mode->valuestring, "review") == 0) != (answer != NULL))) return 0;
+    return conversation == NULL || (cJSON_IsString(conversation) && chat_uuid_valid(conversation->valuestring));
+}
+
+static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
+                                    const char *method, const char *body,
+                                    size_t body_len, const AppConfig *cfg) {
+    const char *authorization = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
+    Session *session = session_validate(extract_bearer_token(authorization));
+    if (session == NULL) return chat_error(conn, 401, "UNAUTHORIZED", "未登录或 token 已过期");
+    const int submit = strcmp(url, "/api/v1/chat") == 0;
+    if ((submit && strcmp(method, "POST") != 0) ||
+        (!submit && strcmp(method, "GET") != 0 && strcmp(method, "DELETE") != 0)) {
+        return chat_method_error(conn, submit ? "POST" : "GET, DELETE");
+    }
+    char path[96] = "/internal/v1/jobs";
+    char *payload = NULL;
+    if (submit) {
+        AiAccess entitlement;
+        time_t now = time(NULL);
+        if (now < 0 || ai_access_get(cfg->db, session->user_id, (sqlite3_int64)now, &entitlement) != 0)
+            return chat_error(conn, 503, "AI_ACCESS_UNAVAILABLE", "AI 授权暂时无法核验，请稍后重试");
+        if (entitlement.status != AI_ACCESS_ACTIVE)
+            return chat_error(conn, 403, ai_access_error_code(entitlement.status), "当前账号未获有效 AI 授权，请联系平台负责人");
+        const char *media_type = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Content-Type");
+        if (media_type == NULL || strncasecmp(media_type, "application/json", 16) != 0 ||
+            (media_type[16] != '\0' && media_type[16] != ';')) {
+            return chat_error(conn, 415, "UNSUPPORTED_MEDIA_TYPE", "请使用 application/json");
+        }
+        const char *parse_end = NULL;
+        cJSON *input = body != NULL ? cJSON_ParseWithLengthOpts(body, body_len + 1, &parse_end, 1) : NULL;
+        if (!chat_fields_valid(input) || parse_end != body + body_len ||
+            chat_contains_null_escape(body, body_len)) {
+            cJSON_Delete(input);
+            return chat_error(conn, 400, "INVALID_REQUEST", "请求字段或格式不正确");
+        }
+        int question_id = cJSON_GetObjectItemCaseSensitive(input, "question_id")->valueint;
+        char key[32]; snprintf(key, sizeof(key), "%d", question_id);
+        if (cfg->db == NULL || access(cfg->db_path, R_OK) != 0) {
+            cJSON_Delete(input); return chat_error(conn, 500, "INTERNAL_ERROR", "题目读取失败");
+        }
+        cJSON *source = kv_to_question(key, cfg->db);
+        cJSON *status = source != NULL ? cJSON_GetObjectItemCaseSensitive(source, "status") : NULL;
+        if (source == NULL || (cJSON_IsString(status) && strcmp(status->valuestring, "active") != 0)) {
+            cJSON_Delete(source); cJSON_Delete(input);
+            return chat_error(conn, 404, "QUESTION_NOT_FOUND", "题目不存在或不可用");
+        }
+        cJSON *request = cJSON_CreateObject();
+        cJSON *question = request != NULL ? cJSON_AddObjectToObject(request, "question") : NULL;
+        const char *fields[] = { "id", "content", "options", "knowledge_points", "type" };
+        int valid = question != NULL && cJSON_AddNumberToObject(request, "user_id", session->user_id) != NULL;
+        for (size_t i = 0; valid && i < sizeof(fields) / sizeof(fields[0]); i++) {
+            cJSON *value = cJSON_GetObjectItemCaseSensitive(source, fields[i]);
+            cJSON *copy = value != NULL ? cJSON_Duplicate(value, 1) : NULL;
+            if (copy == NULL || !cJSON_AddItemToObject(question, fields[i], copy)) {
+                cJSON_Delete(copy); valid = 0;
+            }
+        }
+        cJSON *message = cJSON_GetObjectItemCaseSensitive(input, "message");
+        if (valid && cJSON_AddStringToObject(request, "message", message->valuestring) == NULL) valid = 0;
+        cJSON *conversation = cJSON_GetObjectItemCaseSensitive(input, "conversation_id");
+        if (valid && conversation != NULL && cJSON_AddStringToObject(request, "conversation_id", conversation->valuestring) == NULL) valid = 0;
+        const char *teaching_fields[] = { "mode", "student_answer" };
+        for (size_t i = 0; valid && i < sizeof(teaching_fields) / sizeof(teaching_fields[0]); i++) {
+            cJSON *value = cJSON_GetObjectItemCaseSensitive(input, teaching_fields[i]);
+            if (value != NULL && cJSON_AddStringToObject(request, teaching_fields[i], value->valuestring) == NULL) valid = 0;
+        }
+        if (valid) payload = cJSON_PrintUnformatted(request);
+        cJSON_Delete(request); cJSON_Delete(source); cJSON_Delete(input);
+        if (payload == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "题目读取失败");
+    } else {
+        const char *job_id = url + sizeof("/api/v1/chat/") - 1;
+        if (!chat_uuid_valid(job_id)) return chat_error(conn, 404, "JOB_NOT_FOUND", "任务不存在或已过期");
+        snprintf(path, sizeof(path), "/internal/v1/jobs/%s", job_id);
+    }
+    char *response = NULL;
+    int http_status = ai_service_request(cfg, method, path, session->user_id, payload, &response);
+    cJSON_free(payload);
+    if (response == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "服务器内部错误");
+    enum MHD_Result ret = reply_json(conn, (unsigned int)http_status, response);
+    free(response);
+    return ret;
+}
+
 /* ── 静态文件服务 ── */
 
 static const char *content_type_for(const char *path) {
@@ -629,9 +826,15 @@ enum MHD_Result route_dispatch(struct MHD_Connection *conn, const char *url,
     }
 
     /* 只匹配题目列表及详情路径；沿用现有会话校验。 */
+    if (strcmp(url, "/api/v1/ai/access") == 0) return handle_ai_access(conn, method, cfg);
     if (strcmp(url, "/api/v1/questions") == 0 ||
         strncmp(url, "/api/v1/questions/", sizeof("/api/v1/questions/") - 1) == 0) {
         return handle_questions(conn, url, method, cfg);
+    }
+
+    if (strcmp(url, "/api/v1/chat") == 0 ||
+        strncmp(url, "/api/v1/chat/", sizeof("/api/v1/chat/") - 1) == 0) {
+        return handle_chat(conn, url, method, body, body_len, cfg);
     }
 
     /* 其他 /api/ 路径 → 404 */

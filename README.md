@@ -9,6 +9,7 @@
 | 模块 | 技术 | 说明 |
 | --- | --- | --- |
 | server（后端） | **C11** · libmicrohttpd · SQLite3 · libcurl · cJSON | HTTP 服务 + 存储 + AI 代理（API Key 不出后端） |
+| ai-service | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部模型执行、教学技能与异步队列 |
 | web（前端） | 纯 HTML / CSS / JS | 静态页面，由 C 服务端直接托管，无构建工具链 |
 | 构建 | GNU Make + gcc | 根 `Makefile` 统一分派各模块 |
 | 部署 | systemd（课程服务器 Linux） | 见 `docs/environment-setup.md` |
@@ -62,14 +63,30 @@ curl http://<服务器IP>:8000/api/v1/health   # 应返回 {"status":"ok"}
 PORT=8000                       # 监听端口
 DATABASE_PATH=data/ai_question_bank.db
 WEB_ROOT=../web                 # 静态页根目录（相对 server/ 工作目录）
-AI_API_BASE_URL=https://api.openai.com/v1   # 大模型（OpenAI 兼容协议）
-AI_API_KEY=                     # 仅后端持有，不暴露前端
-AI_MODEL=gpt-4o-mini
+AI_SERVICE_URL=http://127.0.0.1:8001   # C只访问内部Pi服务
+AI_SERVICE_TOKEN=                   # C与Pi共享内部凭证，与用户token不同
+AI_CONNECT_TIMEOUT_MS=500           # 内部HTTP连接超时，毫秒
+AI_REQUEST_TIMEOUT_MS=2000          # 内部HTTP总超时（含连接），毫秒
 ```
+
+模型的 `AI_API_BASE_URL / AI_MODEL / AI_API_KEY` 仅配置在 Pi 服务环境；C不再读取这些旧变量。
 
 生产部署：复制 `server/.env.example` 为 `server/.env` 填写，由 systemd `EnvironmentFile` 加载。
 
 固定题目列表与详情的字段约定、登录要求及回归用例见 [docs/questions.md](docs/questions.md)。
+
+## Pi Agent 后端
+
+C 主后端通过内部 HTTP 接口调用独立的 Node.js/TypeScript Pi 服务。
+支持完整讲解、分层提示、错因分析，以及异步任务、同题追问和取消，默认可用 Mock 联调。
+提供受限算术、一元一次方程求解/代入校验工具和30个解题评测案例。
+
+- 统一 API 授权与边界：[docs/ai-access.md](docs/ai-access.md)（所有账号默认无AI权限，需运维CLI显式授权）
+- 启动与模型配置：[ai-service/README.md](ai-service/README.md)
+- V4.1-Flash真实模型阶段验证：[docs/pi-chat-evaluation.md](docs/pi-chat-evaluation.md)
+- 前端接口档案：[docs/pi-chat-api.md](docs/pi-chat-api.md)
+- OpenAPI：[docs/pi-chat-openapi.json](docs/pi-chat-openapi.json)
+- 可用客户端示例：[docs/examples/pi-chat-client.mjs](docs/examples/pi-chat-client.mjs)
 
 ## 协作规范
 

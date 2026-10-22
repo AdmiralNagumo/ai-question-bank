@@ -35,3 +35,8 @@ Desktop.ini
 *.bak
 *.orig
 pre-commit-test
+
+# Pi AI service
+ai-service/node_modules/
+ai-service/dist/
+ai-service/eval/reports/

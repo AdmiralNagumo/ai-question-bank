@@ -38,6 +38,11 @@ TEST_TMP_DIR=$(mktemp -d)
 DB_PATH="${DATABASE_PATH:-$TEST_TMP_DIR/test.db}"
 export DATABASE_PATH="$DB_PATH"
 SERVER_LOG="$TEST_TMP_DIR/server.log"
+PI_PID=""
+export AQB_SKIP_ENV_FILE=1
+export DEMO_ADMIN_PW="${DEMO_ADMIN_PW:-admin123}"
+export DEMO_TEACHER_PW="${DEMO_TEACHER_PW:-teacher123}"
+export DEMO_STUDENT_PW="${DEMO_STUDENT_PW:-student123}"
 AQB_TEST_BIN_DIR="/tmp/aqb_test_bin_$$"
 export AQB_TEST_BIN_DIR
 if [ -e "$DB_PATH" ]; then
@@ -91,6 +96,9 @@ mkdir -p "$AQB_TEST_BIN_DIR"
 # 格式：test_name|编译命令
 # 每次新增 C 测试源文件时，在此添加一行即可。
 COMPILE_RULES=(
+    "session_entropy_unit|gcc -std=c11 -Iinclude -O0 -Wall -Wextra tests/ai_access/case_unit_session.c src/auth.c -Wl,--wrap=RAND_bytes -lcrypto -o ${AQB_TEST_BIN_DIR}/session_entropy_unit"
+    "ai_access_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/ai_access/case_unit.c src/ai_access.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/ai_access_unit"
+    "chat_proxy|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/chat/case_unit_proxy.c src/ai_client.c src/config.c third_party/cJSON.c -lcurl -lm -o ${AQB_TEST_BIN_DIR}/chat_proxy"
     "kv_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/kv/case_unit.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/kv_unit"
 )
 
@@ -185,28 +193,7 @@ SERVER_PID=""
 start_server() {
     >"$SERVER_LOG"  # 先清空日志
 
-    # 用力杀掉占用端口的进程（多尝试几种方式）
-    local port_pid
-    port_pid="$(lsof -t -i ":$TEST_PORT" 2>/dev/null)" || true
-    if [ -n "$port_pid" ]; then
-        kill "$port_pid" 2>/dev/null || true
-        sleep 0.5
-        # 如果还没死，强杀
-        if kill -0 "$port_pid" 2>/dev/null; then
-            kill -9 "$port_pid" 2>/dev/null || true
-            sleep 0.3
-        fi
-    fi
-    # 备用方案：fuser（某些系统可用）
-    fuser -k "${TEST_PORT}/tcp" 2>/dev/null || true
-    sleep 0.3
-
-    # 确认端口已释放
-    if lsof -i ":$TEST_PORT" >/dev/null 2>&1; then
-        echo -e "${RED}⚠ 端口 $TEST_PORT 仍被占用，无法启动测试服务${NC}"
-        exit 1
-    fi
-
+    # 测试只管理自己的进程；端口冲突时让启动失败，不停止其他服务。
     # 清空日志后启动
     : > "$SERVER_LOG"
     ./ai-question-bank-server >"$SERVER_LOG" 2>&1 &
@@ -251,6 +238,7 @@ stop_server() {
 
 cleanup() {
     stop_server
+    if [ -n "$PI_PID" ]; then kill "$PI_PID" 2>/dev/null || true; wait "$PI_PID" 2>/dev/null || true; fi
     rm -rf "$AQB_TEST_BIN_DIR" "$TEST_TMP_DIR"
 }
 trap cleanup EXIT
@@ -272,6 +260,28 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}  Phase 2: API 集成测试${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
+
+
+# Pi 仅在 chat 集成组运行时启动；Mock 走真实 Pi Agent，不访问外部模型。
+if [[ " ${DIRS[*]} " == *" chat "* || " ${DIRS[*]} " == *" ai_access "* ]]; then
+    AI_NODE=$(bash ../scripts/find_ai_node.sh)
+    make -C ../ai-service build
+    export AI_SERVICE_TOKEN
+    AI_SERVICE_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+    PI_LOG="$TEST_TMP_DIR/pi.log"
+    AI_MOCK=1 AI_API_KEY= AI_MOCK_DELAY_MS=200 AI_SERVICE_PORT=0 \
+        "$AI_NODE" ../ai-service/dist/src/server.js >"$PI_LOG" 2>&1 &
+    PI_PID=$!
+    PI_PORT=""
+    for _ in $(seq 1 100); do
+        if ! kill -0 "$PI_PID" 2>/dev/null; then cat "$PI_LOG"; exit 1; fi
+        PI_PORT=$(python3 -c 'import json,sys; lines=open(sys.argv[1]).read().splitlines(); data=[json.loads(line) for line in lines if line.startswith("{")]; print(next((x["port"] for x in data if x.get("event")=="listening"), ""))' "$PI_LOG")
+        [ -n "$PI_PORT" ] && break
+        sleep 0.1
+    done
+    [ -n "$PI_PORT" ] || { echo 'Pi service readiness timeout'; exit 1; }
+    export AI_SERVICE_URL="http://127.0.0.1:$PI_PORT"
+fi
 
 start_server
 
