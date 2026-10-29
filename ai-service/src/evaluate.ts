@@ -51,7 +51,7 @@ async function main() {
     console.log(`已检查 ${fixtures.length} 个评测案例；未调用模型。真实评测须显式设置 AI_EVAL_REAL=1 和模型配置。`);
     return;
   }
-  const config = loadConfig({ ...process.env, AI_MOCK: '0', AI_SERVICE_TOKEN: randomBytes(24).toString('hex') });
+  const config = loadConfig({ ...process.env, AI_MOCK: '0', AI_ROUTING_MODE: 'platform', AI_SERVICE_TOKEN: randomBytes(24).toString('hex') });
   const hash = (path: string) => createHash('sha256').update(readFileSync(new URL('../../' + path, import.meta.url))).digest('hex');
   const revision = {
     fixtures: hash('eval/fixtures.json'), agent: hash('src/agent.ts'), teaching: hash('src/teaching.ts'), jobs: hash('src/jobs.ts'), math_tools: hash('src/math-tools.ts'), answer_review: hash('src/answer-review.ts'),

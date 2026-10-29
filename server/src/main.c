@@ -7,6 +7,7 @@
 #include "http_server.h"
 #include "kv_store.h"
 #include "ai_access.h"
+#include "teacher_api.h"
 
 int main(void) {
     AppConfig cfg = config_load();
@@ -52,6 +53,10 @@ int main(void) {
     if (ai_access_init(cfg.db) != 0) {
         fprintf(stderr, "✘ AI 授权存储初始化失败\n");
         sqlite3_close(cfg.db); return 1;
+    }
+
+    if (teacher_api_init(cfg.db) != 0) {
+        fprintf(stderr,"教师API存储初始化失败\n"); sqlite3_close(cfg.db); return 1;
     }
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {

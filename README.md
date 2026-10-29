@@ -1,5 +1,17 @@
 # AI+题库智能教学平台
 
+
+## 教师 API v1.3（当前默认模式）
+
+默认AI_ROUTING_MODE=teacher：教师注册/登录即有资格GET/PUT/PATCH自己的/api/v1/teacher/ai-api，一个教师一条配置。学生提交题目后由C从qdata.teacher_id解析配置并校验日额度（默认每学生/每教师/上海自然日20次）；不叠加旧CLI授权，不回退平台Key。
+
+仓库根目录先执行python3 scripts/configure_pi_demo.py和python3 scripts/configure_teacher_api.py，后者只补充C的加密主密钥，绝不打印或覆盖已有值。两个服务的AI_ROUTING_MODE保持一致；教师模式Pi无需全局AI_API_KEY。保留已有Key只在显式platform兼容模式使用。
+
+启动后由前端/接口工具登录教师并配置其API。现有演示题归属admin，不会自动转移，需题库负责人提供teacher归属的题目联调。不要把新限额/路由测试误判为旧演示题直接可调用。
+
+前端接口：`docs/pi-chat-api.md`（1.3）、`docs/teacher-api.md`及OpenAPI；教师Key只进后端，GET只回脱敏信息。本次没有改web业务页面、题库CRUD或注册策略。
+
+
 一个面向教育场景的 **多教师、多学生、多租户** 智能题库与试卷管理平台。教师维护题库/试卷并配置 AI 解答；学生提交题目、查看 AI 解答、在分支对话树中追问；管理员负责用户、全局 API、审计与运维。
 
 功能预期详见 [`docs/AI题库项目整体预期功能说明书.md`](docs/AI题库项目整体预期功能说明书.md)。

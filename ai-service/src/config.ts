@@ -5,6 +5,7 @@ export interface Config {
   mock: boolean;
   mockDelayMs: number;
   apiKey: string;
+  routingMode: 'teacher' | 'platform';
   baseUrl: string;
   model: string;
   timeoutMs: number;
@@ -33,7 +34,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const mock = env.AI_MOCK === '1';
   const apiKey = env.AI_API_KEY ?? '';
-  if (!mock && !apiKey) throw new Error('AI_API_KEY is required in real mode');
+  const routingMode = env.AI_ROUTING_MODE ?? 'teacher';
+  if (routingMode !== 'teacher' && routingMode !== 'platform') throw new Error('Invalid AI_ROUTING_MODE');
+  if (!mock && routingMode === 'platform' && !apiKey) throw new Error('AI_API_KEY is required in real platform mode');
   const baseUrl = env.AI_API_BASE_URL ?? 'https://api.deepseek.com';
   const url = new URL(baseUrl);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password ||
@@ -46,7 +49,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     host: env.AI_SERVICE_HOST ?? '127.0.0.1',
     port: integer(env, 'AI_SERVICE_PORT', 8001, 0, 65535),
-    serviceToken, mock, apiKey, baseUrl, model,
+    serviceToken, mock, apiKey, baseUrl, model, routingMode,
     mockDelayMs: integer(env, 'AI_MOCK_DELAY_MS', 40, 0, 30000),
     timeoutMs: integer(env, 'AI_TIMEOUT_MS', 30000, 50, 120000),
     maxModelCalls: integer(env, 'AI_MAX_MODEL_CALLS', 3, 1, 8),

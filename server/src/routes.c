@@ -15,6 +15,9 @@
 
 #include "ai_client.h"
 #include "ai_access.h"
+#include "teacher_api.h"
+#include "teacher_api_routes.h"
+#include <openssl/crypto.h>
 #include "auth.h"
 #include "cJSON.h"
 #include "config.h"
@@ -660,13 +663,17 @@ static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
     }
     char path[96] = "/internal/v1/jobs";
     char *payload = NULL;
+    TeacherExecution execution={0};
+    const int teacher_mode=cfg->ai_routing_mode && !strcmp(cfg->ai_routing_mode,"teacher");
     if (submit) {
+        if (!teacher_mode) {
         AiAccess entitlement;
         time_t now = time(NULL);
         if (now < 0 || ai_access_get(cfg->db, session->user_id, (sqlite3_int64)now, &entitlement) != 0)
             return chat_error(conn, 503, "AI_ACCESS_UNAVAILABLE", "AI 授权暂时无法核验，请稍后重试");
         if (entitlement.status != AI_ACCESS_ACTIVE)
             return chat_error(conn, 403, ai_access_error_code(entitlement.status), "当前账号未获有效 AI 授权，请联系平台负责人");
+        }
         const char *media_type = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Content-Type");
         if (media_type == NULL || strncasecmp(media_type, "application/json", 16) != 0 ||
             (media_type[16] != '\0' && media_type[16] != ';')) {
@@ -710,9 +717,41 @@ static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
             cJSON *value = cJSON_GetObjectItemCaseSensitive(input, teaching_fields[i]);
             if (value != NULL && cJSON_AddStringToObject(request, teaching_fields[i], value->valuestring) == NULL) valid = 0;
         }
+        if (valid && teacher_mode) {
+            cJSON *access=NULL;
+            const char *code=teacher_api_resolve(cfg,session->user_id,session->role,question_id,1,&execution,&access);
+            if (code) {
+                cJSON_Delete(request); cJSON_Delete(source); cJSON_Delete(input);
+                teacher_api_clear(&execution);
+                if (!strcmp(code,"AI_QUOTA_EXCEEDED") && access) {
+                    cJSON_AddStringToObject(access,"error","本周期AI使用次数已用完"); cJSON_AddStringToObject(access,"code",code);
+                    char *error=cJSON_PrintUnformatted(access); cJSON_Delete(access);
+                    if (!error) return chat_error(conn,500,"INTERNAL_ERROR","服务器内部错误");
+                    struct MHD_Response *response=MHD_create_response_from_buffer(strlen(error),error,MHD_RESPMEM_MUST_COPY);
+                    cJSON_free(error); if (!response) return MHD_NO;
+                    char retry[32]; time_t current=time(NULL);
+                    snprintf(retry,sizeof(retry),"%lld",(long long)(86400-((current+28800)%86400)));
+                    MHD_add_response_header(response,"Content-Type","application/json; charset=utf-8");
+                    MHD_add_response_header(response,"Cache-Control","no-store"); MHD_add_response_header(response,"Retry-After",retry);
+                    enum MHD_Result ret=MHD_queue_response(conn,429,response); MHD_destroy_response(response); return ret;
+                }
+                cJSON_Delete(access);
+                return chat_error(conn,(unsigned int)teacher_api_error_status(code),code,"教师API不可用或无调用资格");
+            }
+            cJSON_Delete(access);
+            cJSON *private_config=cJSON_AddObjectToObject(request,"execution");
+            valid=private_config && cJSON_AddStringToObject(private_config,"api_key",execution.api_key) &&
+                cJSON_AddStringToObject(private_config,"model",execution.model) &&
+                cJSON_AddNumberToObject(private_config,"teacher_id",execution.teacher_id) &&
+                cJSON_AddNumberToObject(private_config,"version",execution.version);
+        }
         if (valid) payload = cJSON_PrintUnformatted(request);
+        teacher_api_clear_request(request);
         cJSON_Delete(request); cJSON_Delete(source); cJSON_Delete(input);
-        if (payload == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "题目读取失败");
+        if (payload == NULL) {
+            if (teacher_api_refund(cfg->db,execution.charge_id)) fprintf(stderr,"[teacher-api] refund failed\n");
+            teacher_api_clear(&execution); return chat_error(conn,500,"INTERNAL_ERROR","题目读取失败");
+        }
     } else {
         const char *job_id = url + sizeof("/api/v1/chat/") - 1;
         if (!chat_uuid_valid(job_id)) return chat_error(conn, 404, "JOB_NOT_FOUND", "任务不存在或已过期");
@@ -720,7 +759,18 @@ static enum MHD_Result handle_chat(struct MHD_Connection *conn, const char *url,
     }
     char *response = NULL;
     int http_status = ai_service_request(cfg, method, path, session->user_id, payload, &response);
+    if (payload) OPENSSL_cleanse(payload,strlen(payload));
     cJSON_free(payload);
+    /* 仅明确未接收的响应释放；超时/损坏响应不能证明未执行，保守计次。 */
+    if (execution.charge_id && response) {
+        cJSON *answer=cJSON_Parse(response);
+        cJSON *code=cJSON_GetObjectItemCaseSensitive(answer,"code");
+        int rejected=http_status==400 || http_status==404 || http_status==409 || http_status==413 || http_status==415 ||
+            (http_status==503 && cJSON_IsString(code) && !strcmp(code->valuestring,"AI_BUSY"));
+        if (rejected && teacher_api_refund(cfg->db,execution.charge_id)) fprintf(stderr,"[teacher-api] refund failed\n");
+        cJSON_Delete(answer);
+    }
+    teacher_api_clear(&execution);
     if (response == NULL) return chat_error(conn, 500, "INTERNAL_ERROR", "服务器内部错误");
     enum MHD_Result ret = reply_json(conn, (unsigned int)http_status, response);
     free(response);
@@ -794,6 +844,9 @@ static enum MHD_Result serve_static(struct MHD_Connection *conn, const char *url
 enum MHD_Result route_dispatch(struct MHD_Connection *conn, const char *url,
                                const char *method, const char *body,
                                size_t body_len, const AppConfig *cfg) {
+    if (!strcmp(url,"/api/v1/teacher/ai-api") ||
+        (!strcmp(url,"/api/v1/ai/access") && cfg->ai_routing_mode && !strcmp(cfg->ai_routing_mode,"teacher")))
+        return teacher_api_route(conn,url,method,body,body_len,cfg);
     /* GET /api/v1/health */
     if (strcmp(method, "GET") == 0 &&
         strncmp(url, "/api/v1/health", 14) == 0 &&

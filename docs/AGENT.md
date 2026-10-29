@@ -1,5 +1,17 @@
 # AGENT.md — AI Agent 项目手册
 
+
+## 教师 API v1.3（当前默认模式）
+
+默认AI_ROUTING_MODE=teacher：教师注册/登录即有资格GET/PUT/PATCH自己的/api/v1/teacher/ai-api，一个教师一条配置。学生提交题目后由C从qdata.teacher_id解析配置并校验日额度（默认每学生/每教师/上海自然日20次）；不叠加旧CLI授权，不回退平台Key。
+
+仓库根目录先执行python3 scripts/configure_pi_demo.py和python3 scripts/configure_teacher_api.py，后者只补充C的加密主密钥，绝不打印或覆盖已有值。两个服务的AI_ROUTING_MODE保持一致；教师模式Pi无需全局AI_API_KEY。保留已有Key只在显式platform兼容模式使用。
+
+启动后由前端/接口工具登录教师并配置其API。现有演示题归属admin，不会自动转移，需题库负责人提供teacher归属的题目联调。不要把新限额/路由测试误判为旧演示题直接可调用。
+
+前端接口：`docs/pi-chat-api.md`（1.3）、`docs/teacher-api.md`及OpenAPI；教师Key只进后端，GET只回脱敏信息。本次没有改web业务页面、题库CRUD或注册策略。
+
+
 > 维护者：戴儒骋、卢恒毅
 > 用途：AI Agent 在本项目中生成/修改代码时的唯一权威参考。  
 > 更新频率：项目结构、构建命令或编码规范变更时同步更新。
@@ -24,7 +36,7 @@
 |------|------|------|
 | 后端 | **C11** · libmicrohttpd · SQLite3 · libcurl · cJSON | HTTP 服务 + 存储 + AI 代理（API Key 不出后端） |
 | 存储层 | db.c（SQL 关系表）+ **kv_store**（目录式 KV） | 当前users/questions走KV；namespace实际映射同名表（users/questions），旧文档的kv_前缀不适用于现实现。AI授权/审计为专用关系表 |
-| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，平台模型Key仅Pi持有 |
+| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，teacher模式Key由C加密托管并按任务交给Pi；platform模式Key仅Pi环境持有 |
 | 前端 | 纯 HTML / CSS / JS | 静态页面，由 C 服务端直接托管，无构建工具链 |
 | 构建 | GNU Make + gcc | `-std=c11 -Wall -Wextra`，零警告编译 |
 | 部署 | systemd（Linux 服务器） | 见 `environment-setup.md` |
@@ -365,7 +377,7 @@ main（受保护） ← PR（Squash merge） ← feat/fix/docs/... 分支
 | 后端-题库 | 李俊熠 | 题目 CRUD 路由（只读接口已接入 kv_store）, `db.c` 扩展 |
 | 后端-审核/通知 | 牛宇歌 | 内容审核、通知中心（P2），配合其他后端模块 |
 | 后端-安全/测试/架构 | 卢恒毅 | 代码审查、测试体系、CI、安全审计 |
-| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，平台模型Key仅Pi持有 |
+| AI执行 | Node.js >=22.19 · TypeScript · Pi 0.84.1 | 内部教学技能/受限数学工具/异步队列，teacher模式Key由C加密托管并按任务交给Pi；platform模式Key仅Pi环境持有 |
 | 前端 | 曹渲东、王英杰 | `web/` 全部 |
 | 文档/接口 | 戴儒骋 | `AGENT.md`、`api.md`、功能说明书 |
 
@@ -385,3 +397,5 @@ main（受保护） ← PR（Squash merge） ← feat/fix/docs/... 分支
 - server/tests/ai_access/：C权限单元、会话随机源失败和HTTP+CLI集成；chat测试显式授权自己的临时库，禁止依赖真实.env。
 - docs/pi-chat-api.md、pi-chat-openapi.json、examples/pi-chat-client.mjs、ai-access.md：前端1.2契约与边界。
 - 根make lint/build/test同时覆盖C与Pi；单跑C可make -C server lint build test。
+
+新增teacher_api.c/h：独立API配置/加密/配额数据层，复用main共享连接；teacher_api_routes.c/h仅HTTP校验/序列化；routes.c仅改AI路由与提交桥接，不改题库handler。教师管理资格只看已登录teacher（用户已明确无需额外审核）。Key不加入prompt、历史或公开任务。teacher_api测试使用独立临时题库，不依赖真实.env。

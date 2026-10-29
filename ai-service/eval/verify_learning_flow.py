@@ -30,7 +30,7 @@ def request(base, path, method='GET', value=None, token=None):
 
 with tempfile.TemporaryDirectory(prefix='aqb-v4flash-stage2-') as tmp:
     try:
-        env = dict(os.environ, AI_MOCK='0', AI_SERVICE_PORT='0', AI_SERVICE_TOKEN=secrets.token_hex(32))
+        env = dict(os.environ, AI_ROUTING_MODE='platform', AI_MOCK='0', AI_SERVICE_PORT='0', AI_SERVICE_TOKEN=secrets.token_hex(32))
         pi_log = open(Path(tmp) / 'pi.log', 'w')
         pi = subprocess.Popen([node, '--env-file=' + str(repo / 'ai-service/.env'), str(repo / 'ai-service/dist/src/server.js')],
                               env=env, stdout=subprocess.PIPE, stderr=pi_log, text=True)

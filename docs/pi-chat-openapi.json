@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "题库 Pi Agent 公共接口",
-    "version": "1.2.0",
-    "description": "前端仅调用 C 后端。POST 接受异步任务，GET 查询结果；任务失败可在 HTTP 200 中以 status=failed 返回。 所有角色默认无AI授权；前端先GET /api/v1/ai/access，POST每次仍由C检查授权。模型配置统一保存在Pi服务端。"
+    "version": "1.3.0",
+    "description": "默认teacher路由：教师自行管理一个API，学生按题目归属使用并受配额限制。前端只调用C，不接触内部凭证或完整Key。platform为显式旧版兼容。"
   },
   "servers": [
     {
@@ -63,7 +63,7 @@
             }
           },
           "404": {
-            "description": "资源不可访问或已过期",
+            "description": "资源不可访问或已过期；AI_API_NOT_CONFIGURED表示教师未配置",
             "content": {
               "application/json": {
                 "schema": {
@@ -83,7 +83,7 @@
             }
           },
           "409": {
-            "description": "对话忙、历史过长或教学模式不匹配；切换模式需新建对话",
+            "description": "对话忙、历史过长或教学模式不匹配；切换模式需新建对话；AI_CREDENTIAL_CHANGED需清除conversation_id建立新对话",
             "content": {
               "application/json": {
                 "schema": {
@@ -133,7 +133,7 @@
             }
           },
           "503": {
-            "description": "服务未配置、不可用或繁忙；AI_ACCESS_UNAVAILABLE表示权限存储故障，禁止新提交",
+            "description": "服务未配置、不可用或繁忙；AI_ACCESS_UNAVAILABLE表示权限存储故障，禁止新提交；AI_API_UNAVAILABLE / AI_CREDENTIALS_UNAVAILABLE拒绝，不回退平台Key",
             "content": {
               "application/json": {
                 "schema": {
@@ -153,7 +153,7 @@
             }
           },
           "403": {
-            "description": "AI_ACCESS_REQUIRED / AI_ACCESS_REVOKED / AI_ACCESS_EXPIRED：保留登录和输入，刷新权限；不自动重试POST",
+            "description": "AI_ACCESS_REQUIRED / AI_ACCESS_REVOKED / AI_ACCESS_EXPIRED：保留登录和输入，刷新权限；不自动重试POST；teacher模式为AI_API_DISABLED / AI_TEACHER_ONLY",
             "content": {
               "application/json": {
                 "schema": {
@@ -161,9 +161,19 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "AI_QUOTA_EXCEEDED；Retry-After秒数，quota.reset_at由服务器提供",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaError"
+                }
+              }
+            }
           }
         },
-        "description": "仅有效登录且AI授权active可提交。登录/方法检查后先检查授权，再校验请求和题目；接收层超大请求可能先413。撤销不强制杀死已有任务；不提供幂等计费或退款保证。"
+        "description": "teacher模式从题目teacher_id选配置并检查学生日额度，不接受客户端归属/执行配置，不叠加旧CLI授权。接收后失败/取消不退次数，超时不自动重复POST；platform模式兼容旧全局授权。"
       }
     },
     "/api/v1/chat/{job_id}": {
@@ -357,7 +367,7 @@
       "get": {
         "operationId": "getAiAccess",
         "summary": "查询当前登录用户AI使用权限",
-        "description": "只查权限，不探测模型；禁止缓存。所有角色默认not_granted。无授权仍可查询/取消本人既有任务。",
+        "description": "teacher模式先选题再查权限，返回配额，不扣次；不可用时200/allowed=false附reason_code，存储或解密失败503。platform模式沿用全局授权。",
         "responses": {
           "200": {
             "description": "Cache-Control: no-store；active仅表示授权有效",
@@ -396,6 +406,292 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              }
+            }
+          },
+          "400": {
+            "description": "QUESTION_REQUIRED / INVALID_REQUEST",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "QUESTION_NOT_FOUND",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "AI_TEACHER_ONLY",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "question_id",
+            "required": false,
+            "description": "默认teacher模式必填；旧platform模式不需要",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/teacher/ai-api": {
+      "get": {
+        "operationId": "getTeacherApi",
+        "summary": "查询自己的脱敏配置",
+        "description": "仅登录teacher，归属由token确定；student/admin不可用。一个教师一条配置，无HTTP完整Key读取。",
+        "responses": {
+          "200": {
+            "description": "Cache-Control: no-store；成功，仅脱敏配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeacherApiMetadata"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UNAUTHORIZED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "TEACHER_REQUIRED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "METHOD_NOT_ALLOWED；Allow: GET, PUT, PATCH",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "AI_API_UNAVAILABLE / AI_CREDENTIALS_UNAVAILABLE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceTeacherApi",
+        "summary": "添加或替换自己的API并启用",
+        "description": "仅登录teacher，归属由token确定；student/admin不可用。一个教师一条配置，无HTTP完整Key读取。",
+        "responses": {
+          "200": {
+            "description": "Cache-Control: no-store；成功，仅脱敏配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeacherApiMetadata"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UNAUTHORIZED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "TEACHER_REQUIRED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "METHOD_NOT_ALLOWED；Allow: GET, PUT, PATCH",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "AI_API_UNAVAILABLE / AI_CREDENTIALS_UNAVAILABLE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_REQUEST，拒绝未知/重复字段与NUL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "UNSUPPORTED_MEDIA_TYPE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeacherApiInput"
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "setTeacherApiEnabled",
+        "summary": "启用或停用自己的API",
+        "description": "仅登录teacher，归属由token确定；student/admin不可用。一个教师一条配置，无HTTP完整Key读取。",
+        "responses": {
+          "200": {
+            "description": "Cache-Control: no-store；成功，仅脱敏配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeacherApiMetadata"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UNAUTHORIZED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "TEACHER_REQUIRED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "METHOD_NOT_ALLOWED；Allow: GET, PUT, PATCH",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "AI_API_UNAVAILABLE / AI_CREDENTIALS_UNAVAILABLE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_REQUEST，拒绝未知/重复字段与NUL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "UNSUPPORTED_MEDIA_TYPE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "AI_API_NOT_CONFIGURED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeacherApiToggle"
               }
             }
           }
@@ -954,6 +1250,15 @@
         "properties": {
           "ai_access": {
             "$ref": "#/components/schemas/AiAccess"
+          },
+          "teacher_id": {
+            "type": "integer"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "quota": {
+            "$ref": "#/components/schemas/TeacherQuota"
           }
         }
       },
@@ -1014,6 +1319,143 @@
             }
           }
         ]
+      },
+      "TeacherApiInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "api_key"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 512,
+            "pattern": "^[!-~]+$",
+            "writeOnly": true
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.:/-]+$",
+            "default": "deepseek-flash"
+          }
+        }
+      },
+      "TeacherApiToggle": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TeacherApiMetadata": {
+        "type": "object",
+        "required": [
+          "api"
+        ],
+        "properties": {
+          "api": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "configured"
+            ],
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "provider": {
+                "const": "deepseek"
+              },
+              "model": {
+                "type": "string"
+              },
+              "masked_key": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer"
+              },
+              "updated_at": {
+                "type": "integer",
+                "description": "Unix秒"
+              }
+            }
+          }
+        }
+      },
+      "TeacherQuota": {
+        "type": "object",
+        "required": [
+          "applies",
+          "limit",
+          "used",
+          "remaining",
+          "reset_at",
+          "timezone",
+          "scope"
+        ],
+        "properties": {
+          "applies": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "used": {
+            "type": "integer"
+          },
+          "remaining": {
+            "type": "integer"
+          },
+          "reset_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "const": "Asia/Shanghai"
+          },
+          "scope": {
+            "const": "student_teacher_day"
+          }
+        }
+      },
+      "QuotaError": {
+        "type": "object",
+        "required": [
+          "code",
+          "error",
+          "quota"
+        ],
+        "properties": {
+          "ai_access": {
+            "$ref": "#/components/schemas/AiAccess"
+          },
+          "teacher_id": {
+            "type": "integer"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "quota": {
+            "$ref": "#/components/schemas/TeacherQuota"
+          },
+          "code": {
+            "const": "AI_QUOTA_EXCEEDED"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
       }
     }
   }

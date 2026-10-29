@@ -1,5 +1,17 @@
 # 项目架构与扩展指南（C 技术栈）
 
+
+## 教师 API v1.3（当前默认模式）
+
+默认AI_ROUTING_MODE=teacher：教师注册/登录即有资格GET/PUT/PATCH自己的/api/v1/teacher/ai-api，一个教师一条配置。学生提交题目后由C从qdata.teacher_id解析配置并校验日额度（默认每学生/每教师/上海自然日20次）；不叠加旧CLI授权，不回退平台Key。
+
+仓库根目录先执行python3 scripts/configure_pi_demo.py和python3 scripts/configure_teacher_api.py，后者只补充C的加密主密钥，绝不打印或覆盖已有值。两个服务的AI_ROUTING_MODE保持一致；教师模式Pi无需全局AI_API_KEY。保留已有Key只在显式platform兼容模式使用。
+
+启动后由前端/接口工具登录教师并配置其API。现有演示题归属admin，不会自动转移，需题库负责人提供teacher归属的题目联调。不要把新限额/路由测试误判为旧演示题直接可调用。
+
+前端接口：`docs/pi-chat-api.md`（1.3）、`docs/teacher-api.md`及OpenAPI；教师Key只进后端，GET只回脱敏信息。本次没有改web业务页面、题库CRUD或注册策略。
+
+
 ## 1. 总体架构
 
 ```
@@ -17,7 +29,7 @@
 
 - `web/` 为纯静态页面（HTML/CSS/JS），由 C 服务端直接托管，**无 Node/npm 工具链**。
 - `server/` 为唯一公共业务入口：现有登录、题目读取、AI授权和任务代理。多租户业务隔离、试卷/解答树与用户额度属于后续目标，当前未完成。
-- 所有大模型调用由后端统一代理，**API Key 只存在于服务端环境变量**。
+- 所有大模型调用由后端统一代理，**API Key只存在于可信后端：教师配置加密入库，主密钥独立注入；platform兼容配置从Pi环境读取**。
 
 ## 2. 后端分层（server/）
 

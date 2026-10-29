@@ -18,7 +18,7 @@ const question = { id: 1, content: '质量为 2 kg、加速度为 3 m/s^2，合�
 const submission = { user_id: 1, question, message: '请解释解法' };
 function config(changes: Partial<Config> = {}): Config {
   return { ...loadConfig({ AI_SERVICE_TOKEN: serviceToken, AI_MOCK: '1', AI_SERVICE_PORT: '0',
-                          AI_MOCK_DELAY_MS: '0' }), ...changes };
+                          AI_MOCK_DELAY_MS: '0', AI_ROUTING_MODE: 'platform' }), ...changes };
 }
 async function listening(server: Server): Promise<string> {
   server.listen(0, '127.0.0.1');
@@ -58,9 +58,61 @@ async function finish(base: string, id: string) {
   throw new Error('Job did not finish');
 }
 
+test('teacher routing needs no platform key and validates private execution config', async () => {
+  const settings = loadConfig({ AI_SERVICE_TOKEN: serviceToken });
+  assert.equal(settings.routingMode, 'teacher'); assert.equal(settings.apiKey, '');
+  assert.throws(() => loadConfig({ AI_SERVICE_TOKEN: serviceToken, AI_ROUTING_MODE: 'invalid' }));
+  await usingApp(config({ routingMode: 'teacher' }), async base => {
+    assert.equal((await request(base, '/internal/v1/jobs', 'POST', submission)).body.code, 'INVALID_EXECUTION_CONFIG');
+    const execution = { teacher_id: 2, version: 1, api_key: 'test-only-private-api-key', model: 'deepseek-flash' };
+    for (const invalid of [{ ...execution, teacher_id: 0 }, { ...execution, api_key: 'bad\nkey' },
+                           { ...execution, base_url: 'http://private' }]) {
+      assert.equal((await request(base, '/internal/v1/jobs', 'POST', { ...submission, execution: invalid })).status, 400);
+    }
+    const created = await request(base, '/internal/v1/jobs', 'POST', { ...submission, execution });
+    const done = await finish(base, created.body.job_id);
+    assert.equal(done.status, 'succeeded');
+    assert(!JSON.stringify(done).includes(execution.api_key)); assert.equal(done.execution, undefined);
+    const changed = await request(base, '/internal/v1/jobs', 'POST', { ...submission, conversation_id: done.conversation_id,
+      execution: { ...execution, version: 2 } });
+    assert.equal(changed.status, 409); assert.equal(changed.body.code, 'AI_CREDENTIAL_CHANGED');
+    const reassigned = await request(base, '/internal/v1/jobs', 'POST', { ...submission, conversation_id: done.conversation_id,
+      execution: { ...execution, teacher_id: 4 } });
+    assert.equal(reassigned.body.code, 'AI_CREDENTIAL_CHANGED');
+  });
+});
+
+test('concurrent teacher jobs use independent provider keys/models and never put credentials in prompts or views', async () => {
+  const observed: string[] = [];
+  const firstKey = 'test-teacher-A-private-key'; const secondKey = 'test-teacher-B-private-key';
+  const modelServer = createServer(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    const text = Buffer.concat(chunks).toString(); const body = JSON.parse(text);
+    assert(!text.includes(firstKey) && !text.includes(secondKey));
+    const expected = body.model === 'teacher-model-A' ? firstKey : secondKey;
+    assert.equal(req.headers.authorization, 'Bearer ' + expected);
+    observed.push(body.model); stream(res, { role: 'assistant', content: 'result for ' + body.model });
+  });
+  try {
+    const modelBase = await listening(modelServer);
+    await usingApp(config({ routingMode: 'teacher', mock: false, baseUrl: modelBase + '/v1', apiKey: 'must-not-use-platform-key' }), async base => {
+      const execute = async (teacher: number, key: string, model: string) => {
+        const created = await request(base, '/internal/v1/jobs', 'POST', { ...submission,
+          execution: { teacher_id: teacher, version: 1, api_key: key, model } });
+        assert.equal(created.status, 202);
+        const done = await finish(base, created.body.job_id);
+        assert.equal(done.status, 'succeeded'); assert.equal(done.model, model);
+        assert(!JSON.stringify(done).includes(key)); return done;
+      };
+      await Promise.all([execute(2, firstKey, 'teacher-model-A'), execute(4, secondKey, 'teacher-model-B')]);
+    });
+    assert.deepEqual(observed.sort(), ['teacher-model-A', 'teacher-model-B']);
+  } finally { await close(modelServer); }
+});
+
 test('configuration rejects missing service credentials and requires a key for real calls', () => {
   assert.throws(() => loadConfig({ AI_MOCK: '1' }), /AI_SERVICE_TOKEN/);
-  assert.throws(() => loadConfig({ AI_SERVICE_TOKEN: serviceToken }), /AI_API_KEY/);
+  assert.throws(() => loadConfig({ AI_SERVICE_TOKEN: serviceToken, AI_ROUTING_MODE: 'platform' }), /AI_API_KEY/);
   assert.throws(() => loadConfig({ AI_SERVICE_TOKEN: serviceToken, AI_MOCK: '1', AI_TIMEOUT_MS: 'bad' }));
   assert.throws(() => loadConfig({ AI_SERVICE_TOKEN: serviceToken, AI_MOCK: '1',
                                  AI_API_BASE_URL: 'http://external.example/v1' }));

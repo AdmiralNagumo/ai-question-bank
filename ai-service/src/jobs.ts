@@ -10,6 +10,7 @@ interface Conversation {
   owner: number;
   question: number;
   mode: TeachingMode;
+  credentialScope: string;
   messages: AgentMessage[];
   activeJob?: string;
   touched: number;
@@ -49,6 +50,10 @@ export class Jobs {
   }
   submit(request: Submission) {
     this.clean();
+    if ((this.config.routingMode === 'teacher') !== (request.execution !== undefined)) {
+      throw new ApiError(400, 'INVALID_EXECUTION_CONFIG', '内部执行配置不匹配');
+    }
+    const credentialScope = request.execution ? `${request.execution.teacher_id}:${request.execution.version}` : 'platform';
     if (this.stopped || this.running + this.queue.length >= this.config.concurrency + this.config.queueLimit ||
         this.jobs.size >= this.config.maxConversations * 4) {
       throw new ApiError(503, 'AI_BUSY', '解答任务已满，请稍后重试');
@@ -60,6 +65,9 @@ export class Jobs {
         throw new ApiError(404, 'CONVERSATION_NOT_FOUND', '对话不存在或已过期');
       }
       conversation = found;
+      if (conversation.credentialScope !== credentialScope) {
+        throw new ApiError(409, 'AI_CREDENTIAL_CHANGED', '教师API配置已更新，请新建对话');
+      }
       if (request.mode !== undefined && request.mode !== conversation.mode) {
         throw new ApiError(409, 'CONVERSATION_MODE_MISMATCH', '切换教学模式时请新建对话');
       }
@@ -73,7 +81,7 @@ export class Jobs {
       if (this.conversations.size >= this.config.maxConversations) {
         throw new ApiError(503, 'AI_BUSY', '解答任务已满，请稍后重试');
       }
-      conversation = { id: randomUUID(), owner: request.user_id, question: request.question.id, mode: request.mode ?? 'solve',
+      conversation = { id: randomUUID(), owner: request.user_id, question: request.question.id, mode: request.mode ?? 'solve', credentialScope,
                        messages: [], touched: Date.now() };
     }
     if ((conversation.mode === 'review') !== (request.student_answer !== undefined)) {
@@ -106,6 +114,7 @@ export class Jobs {
     if (job.status === 'queued') {
       this.queue = this.queue.filter(item => item !== job);
       job.status = 'cancelled'; job.finished = Date.now();
+      delete job.request.execution;
       job.conversation.activeJob = undefined;
     } else if (job.status === 'running') {
       job.status = 'cancelled'; job.finished = Date.now();
@@ -136,7 +145,10 @@ export class Jobs {
     try {
       const remaining = Math.floor(this.config.timeoutMs - (performance.now() - job.created));
       if (remaining <= 0) throw new ApiError(504, 'AI_TIMEOUT', '解答超时，请稍后重试');
-      job.run = startAgent({ ...this.config, timeoutMs: remaining }, job.request, job.conversation.messages, job.teaching);
+      const execution = job.request.execution;
+      const runConfig = { ...this.config, timeoutMs: remaining,
+        ...(execution ? { apiKey: execution.api_key, model: execution.model } : {}) };
+      job.run = startAgent(runConfig, job.request, job.conversation.messages, job.teaching);
       const result = await job.run.completion;
       if (job.status !== 'cancelled') {
         job.status = 'succeeded'; job.result = { ...result, messages: [] };
@@ -149,6 +161,7 @@ export class Jobs {
         job.error = { error: api.message, code: api.code, http_status: api.status };
       }
     } finally {
+      delete job.request.execution;
       job.run = undefined; job.finished = Date.now();
       job.conversation.activeJob = undefined; job.conversation.touched = Date.now();
       this.running--;

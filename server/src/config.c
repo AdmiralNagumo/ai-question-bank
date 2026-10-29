@@ -79,5 +79,15 @@ AppConfig config_load(void) {
     cfg.ai_service_token = env_or("AI_SERVICE_TOKEN", "");
     cfg.ai_connect_timeout_ms = timeout_ms("AI_CONNECT_TIMEOUT_MS", AI_CONNECT_TIMEOUT_MS_DEFAULT);
     cfg.ai_request_timeout_ms = timeout_ms("AI_REQUEST_TIMEOUT_MS", AI_REQUEST_TIMEOUT_MS_DEFAULT);
+    const char *routing=env_or("AI_ROUTING_MODE","teacher");
+    cfg.ai_routing_mode=!strcmp(routing,"platform") ? "platform" : "teacher";
+    if (strcmp(routing,"teacher") && strcmp(routing,"platform")) fprintf(stderr,"[config] invalid AI_ROUTING_MODE; using teacher\n");
+    cfg.ai_key_encryption_key=env_or("AI_KEY_ENCRYPTION_KEY","");
+    const char *limit=env_or("AI_STUDENT_DAILY_LIMIT","20");
+    int valid=1;
+    for (const char *p=limit;*p;p++) if (*p<'0' || *p>'9') valid=0;
+    errno=0; char *limit_end=NULL; long daily=strtol(limit,&limit_end,10);
+    cfg.ai_student_daily_limit=valid && !errno && limit_end && !*limit_end && daily>=1 && daily<=10000 ? (int)daily : 20;
+    if (cfg.ai_student_daily_limit==20 && strcmp(limit,"20")) fprintf(stderr,"[config] AI_STUDENT_DAILY_LIMIT normalized or defaulted\n");
     return cfg;
 }

@@ -19,6 +19,9 @@ typedef struct {
     const char *web_root;    /* 静态前端根目录，相对 server/ 工作目录（WEB_ROOT） */
     const char *ai_service_url;   /* AI_SERVICE_URL：内部 Pi 服务地址 */
     const char *ai_service_token; /* AI_SERVICE_TOKEN：内部服务凭证 */
+    const char *ai_routing_mode; /* teacher默认；platform仅兼容旧演示 */
+    const char *ai_key_encryption_key; /* 64位hex，不写DB或日志 */
+    int ai_student_daily_limit; /* 学生/教师/上海自然日 */
     long ai_connect_timeout_ms;  /* AI_CONNECT_TIMEOUT_MS：1–60000，默认500 */
     long ai_request_timeout_ms;  /* AI_REQUEST_TIMEOUT_MS：1–60000，默认2000；包含连接 */
 } AppConfig;

@@ -1,5 +1,17 @@
 # Pi AI 服务
 
+
+## 教师 API v1.3（当前默认模式）
+
+默认AI_ROUTING_MODE=teacher：教师注册/登录即有资格GET/PUT/PATCH自己的/api/v1/teacher/ai-api，一个教师一条配置。学生提交题目后由C从qdata.teacher_id解析配置并校验日额度（默认每学生/每教师/上海自然日20次）；不叠加旧CLI授权，不回退平台Key。
+
+仓库根目录先执行python3 scripts/configure_pi_demo.py和python3 scripts/configure_teacher_api.py，后者只补充C的加密主密钥，绝不打印或覆盖已有值。两个服务的AI_ROUTING_MODE保持一致；教师模式Pi无需全局AI_API_KEY。保留已有Key只在显式platform兼容模式使用。
+
+启动后由前端/接口工具登录教师并配置其API。现有演示题归属admin，不会自动转移，需题库负责人提供teacher归属的题目联调。不要把新限额/路由测试误判为旧演示题直接可调用。
+
+前端接口：`docs/pi-chat-api.md`（1.3）、`docs/teacher-api.md`及OpenAPI；教师Key只进后端，GET只回脱敏信息。本次没有改web业务页面、题库CRUD或注册策略。
+
+
 使用本机已有的 Pi 系列版本 0.84.1：`pi-ai`＋`pi-agent-core`，固定依赖及 lockfile。
 运行于独立 Node.js 进程，C 负责用户登录、题目读取和公共接口；模型调用通过后台任务完成。
 服务加载本项目随代码发布的三个教学 Skill，不加载个人 Pi CLI 配置、扩展、会话或文件/命令工具。
@@ -27,7 +39,7 @@ make -C ai-service run
 make -C server run
 ```
 
-C启动后，在仓库根目录显式给联调账号授权（确认db是C正在使用的DATABASE_PATH）：
+仅在AI_ROUTING_MODE=platform旧演示模式下：C启动后，在仓库根目录显式给联调账号授权（确认db是C正在使用的DATABASE_PATH）：
 
 ```bash
 python3 scripts/ai_access.py --db server/data/ai_question_bank.db status --username student
@@ -56,7 +68,7 @@ AI_API_KEY=你的 API Key
 
 当前实现使用兼容 Chat Completions 的流式模型协议。AI_API_BASE_URL 是基础路径，
 SDK 会调用其 `/chat/completions`；供应商要求 `/v1` 时在 base 中包含 `/v1`。
-模型 Key 仅由 Pi 服务持有。服务凭证与用户登录 token 分别校验；C 内部请求绕过代理且不跟随跳转。
+teacher模式Key由C加密保存、执行时交给Pi；platform模式由Pi环境提供。服务凭证与用户登录 token 分别校验；C 内部请求绕过代理且不跟随跳转。
 自动回归使用Mock与本地兼容HTTP模型，不消耗真实模型额度。先前V4.1-Flash真实验证记录见 `docs/pi-chat-evaluation.md`；该记录不能替代上线后的人工质量检查。一个Pi实例使用一套平台模型配置，不接受客户端或用户个人Key。
 
 ## 模块和限制

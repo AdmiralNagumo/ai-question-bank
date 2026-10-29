@@ -1,6 +1,6 @@
 # Pi Agent 前端接口档案
 
-版本：1.2；日期：2026-10-20。适用于 C 主后端＋独立 Pi AI 服务。
+版本：1.3；日期：2026-10-30。适用于 C 主后端＋独立 Pi AI 服务。
 
 前端只调用 **C 后端的 `/api/v1/*`**。本机默认地址为 `http://localhost:8000`；
 其他机器联调时由后端负责人提供实际地址。Pi 内部端口、模型密钥和服务凭证不发送给前端。
@@ -12,8 +12,8 @@
 ## 1. 前端最短接入流程
 
 1. 调现有 `POST /api/v1/auth/login`，保存返回的用户 `token`。
-2. 调 `GET /api/v1/ai/access`；只有 allowed=true 才开放新任务发送。其他状态仍可浏览题目。
-3. 调 `GET /api/v1/questions` 获取题目，使用返回的 id。
+2. 调 `GET /api/v1/questions` 获取题目并选择，使用返回的 id。
+3. 调 `GET /api/v1/ai/access?question_id=<当前题目ID>`；只有 allowed=true 才开放新任务发送。其他状态仍可浏览题目。
 4. 调 `POST /api/v1/chat` 提交题目和问题，得到 job_id、conversation_id。
 5. 每隔约 800 ms 调 `GET /api/v1/chat/{job_id}`，直到任务结束。
 6. 成功时展示 reply；同一道题追问时传 conversation_id。
@@ -195,7 +195,7 @@ HTTP 错误和 failed 任务都会停止当前客户端轮询；网络错误可�
 
 ```javascript
 const { sendPiChat, getPiAiAccess } = await import('./pi-chat-client.js');
-const access = await getPiAiAccess({ token: API.getToken() });
+const access = await getPiAiAccess({ token: API.getToken(), questionId: currentQuestionId });
 setSendEnabled(access.allowed);
 if (!access.allowed) return; // 页面保留题目、登录和用户输入
 const result = await sendPiChat({
@@ -304,7 +304,7 @@ expires_at 为 UTC RFC3339 秒精度时间或 null；null 表示未设置到期�
 
 ```javascript
 try {
-  const access = await getPiAiAccess({ token: API.getToken() });
+  const access = await getPiAiAccess({ token: API.getToken(), questionId: currentQuestionId });
   renderAiAccess(access);
   setSendEnabled(access.allowed);
 } catch (error) {
@@ -316,3 +316,20 @@ try {
 **撤销边界：** POST 新任务被阻止；已接受的排队/运行任务仍可完成；本人仍可 GET 查询和 DELETE 取消。不要因发送被禁用就清空 job_id 或停止已有任务的查询。跨用户始终不可访问。撤销不退款、不删除历史、不强制中断供应商调用；已通过授权检查的提交仍可能返回 202。
 
 前端只持有用户登录 token。模型 Key、内部服务 token、用户 ID、额度或授权状态都不能作为提交字段。一个 Pi 实例使用平台统一模型配置，本版不提供用户 Key 上传、用户额度/计费、授权管理页面或教师授权接口。完整运维步骤、部署和数据边界见 [ai-access.md](ai-access.md)。现有 web 页面需要前端同学按本档案接入；本次交付的是可运行客户端、接口契约和后端实现。
+
+
+## 11. 教师自管API（1.3，默认teacher模式，优先于第10节旧平台模式）
+
+教师注册并登录后即可管理自己的API，无需旧CLI授权；学生按当前题目归属使用教师配置。第10节的全局CLI授权仅适用于显式AI_ROUTING_MODE=platform兼容模式。本版默认teacher，不能把旧平台配置作为失败回退。
+
+先选题，再调用GET /api/v1/ai/access?question_id=N。仍检查ai_access.allowed；附加reason_code、teacher_id和quota。quota含applies、limit、used、remaining、reset_at、timezone=Asia/Shanghai、scope=student_teacher_day。allowed=false时保留登录、草稿，按reason_code提示；网络/503不得使用旧缓存放行。GET查询不扣次数。
+
+教师页面只需GET/PUT/PATCH /api/v1/teacher/ai-api：PUT发送api_key和可选model，替换即启用；PATCH只发送enabled布尔值。归属从登录token获取，不能传teacher_id/user_id/base_url。GET只返回配置状态、model、masked_key、version、updated_at（Unix秒），不回显完整Key。成功后清空密钥输入框，绝不持久化到浏览器存储。student/admin调用管理接口403；这不是管理员代管入口。
+
+学生每轮新提交计1次，默认每教师每天20次；追问也计次，查询/取消不计新次数。429 AI_QUOTA_EXCEEDED附quota和Retry-After，以服务器reset_at为准，不退出登录，不自动重复POST。不同题目但同教师共享额度，不同教师分别计数。明确未接收的请求释放，已接收失败/取消和结果不确定的超时不退款。
+
+403 AI_API_DISABLED提示“教师已停用AI”；404 AI_API_NOT_CONFIGURED提示“教师尚未配置”；503 AI_CREDENTIALS_UNAVAILABLE/AI_API_UNAVAILABLE保留登录并提示联系教师/运维。409 AI_CREDENTIAL_CHANGED时清除当前conversation_id，以新对话重试，禁止自动重发。已有任务在停用后仍可查询/取消，不能因禁用新发送清空job_id。
+
+客户端示例见examples/teacher-api-client.mjs：getTeacherApi、replaceTeacherApi、setTeacherApiEnabled、getQuestionAiAccess；解题继续使用sendPiChat。页面只负责显隐，服务端会再次鉴权和扣次。现有web业务页面由前端同学接入，本次未修改。
+
+完整请求/响应、加密主密钥、默认模式变更、演示题归属admin限制和未实现范围见[teacher-api.md](teacher-api.md)。

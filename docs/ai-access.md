@@ -1,5 +1,7 @@
 # 统一 AI 接口与用户授权边界
 
+> v1.3新增默认teacher路由；本文以下全局CLI规则仅适用显式AI_ROUTING_MODE=platform。新契约见[teacher-api.md](teacher-api.md)。
+
 版本1.2，2026-10-20。C是唯一业务入口，Pi是内部模型执行服务。
 
 ## 接口契约（实现依据）

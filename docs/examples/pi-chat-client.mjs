@@ -10,9 +10,9 @@ export class PiChatError extends Error {
 }
 
 /** 页面预检查；POST仍会重新核验权限，不能用缓存结果作为授权依据。 */
-export async function getPiAiAccess({ token, baseUrl = '', signal } = {}) {
+export async function getPiAiAccess({ token, questionId, baseUrl = '', signal } = {}) {
   let response;
-  try { response = await fetch(baseUrl.replace(/\/$/, '') + '/api/v1/ai/access', {
+  try { response = await fetch(baseUrl.replace(/\/$/, '') + '/api/v1/ai/access' + (questionId !== undefined ? '?question_id=' + encodeURIComponent(questionId) : ''), {
     headers: { Authorization: 'Bearer ' + token }, signal,
   }); }
   catch { throw new PiChatError('无法查询 AI 使用权限，请重试', { code: 'NETWORK_ERROR' }); }

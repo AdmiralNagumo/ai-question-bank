@@ -40,6 +40,8 @@ export DATABASE_PATH="$DB_PATH"
 SERVER_LOG="$TEST_TMP_DIR/server.log"
 PI_PID=""
 export AQB_SKIP_ENV_FILE=1
+# 旧平台契约回归；teacher_api组用独立服务验证新版默认路由。
+export AI_ROUTING_MODE=platform
 export DEMO_ADMIN_PW="${DEMO_ADMIN_PW:-admin123}"
 export DEMO_TEACHER_PW="${DEMO_TEACHER_PW:-teacher123}"
 export DEMO_STUDENT_PW="${DEMO_STUDENT_PW:-student123}"
@@ -96,6 +98,7 @@ mkdir -p "$AQB_TEST_BIN_DIR"
 # 格式：test_name|编译命令
 # 每次新增 C 测试源文件时，在此添加一行即可。
 COMPILE_RULES=(
+    "teacher_api_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/teacher_api/case_unit.c src/teacher_api.c src/kv_store.c third_party/cJSON.c -Wl,--wrap=time -lsqlite3 -lcrypto -lm -o ${AQB_TEST_BIN_DIR}/teacher_api_unit"
     "session_entropy_unit|gcc -std=c11 -Iinclude -O0 -Wall -Wextra tests/ai_access/case_unit_session.c src/auth.c -Wl,--wrap=RAND_bytes -lcrypto -o ${AQB_TEST_BIN_DIR}/session_entropy_unit"
     "ai_access_unit|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/ai_access/case_unit.c src/ai_access.c src/kv_store.c third_party/cJSON.c -lsqlite3 -lm -o ${AQB_TEST_BIN_DIR}/ai_access_unit"
     "chat_proxy|gcc -std=c11 -Iinclude -Ithird_party -O0 -Wall -Wextra tests/chat/case_unit_proxy.c src/ai_client.c src/config.c third_party/cJSON.c -lcurl -lm -o ${AQB_TEST_BIN_DIR}/chat_proxy"
@@ -251,6 +254,7 @@ echo -e "${CYAN}  Phase 1: 独立单元测试（无需 server）${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 
+if [[ " ${DIRS[*]} " == *" teacher_api "* ]]; then make -C ../ai-service build; fi
 run_case_group "case_unit*" "单元测试"
 
 # ════════════════════════════════════════════════════════════════════════════
