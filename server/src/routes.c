@@ -449,89 +449,481 @@ static cJSON *kv_to_question(const char *key, sqlite3 *db) {
     return obj;
 }
 
+/* ── 题目写操作辅助 ── */
+
+/* 解析 /api/v1/questions/{id} 的题目 id。
+ * 成功返回正数；失败返回 0（已向 conn 发送 404 响应）。 */
+static long long parse_question_id(struct MHD_Connection *conn, const char *url) {
+    const char *id_text = url + sizeof("/api/v1/questions/") - 1;
+    if (*id_text == '\0') {
+        reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+        return 0;
+    }
+    for (const char *p = id_text; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+            return 0;
+        }
+    }
+    errno = 0;
+    char *end = NULL;
+    long long id = strtoll(id_text, &end, 10);
+    if (errno == ERANGE || end == id_text || *end != '\0' || id <= 0) {
+        reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+        return 0;
+    }
+    return id;
+}
+
+/* 计算下一个题目 id：扫描 qdata 现有 key 中的最大数字 id + 1。失败返回 -1。 */
+static int next_question_id(sqlite3 *db) {
+    int count = 0;
+    char **keys = kv_list_keys(db, "qdata", &count);
+    if (keys == NULL) return -1;
+
+    int max_id = 0;
+    for (int i = 0; i < count; i++) {
+        int id = 0;
+        if (kv_str_to_int(keys[i], &id) == 0 && id > max_id) max_id = id;
+    }
+    kv_free_str_array(keys);
+    return max_id + 1;
+}
+
+/* 从已解析的请求体中校验并提取题目字段。
+ * 规则对齐 docs/questions.md 与 tests 的 check_question：
+ *   content 必填非空；type ∈ {single_choice, short_answer}；
+ *   single_choice 的 options 为非空 {label,text} 数组且 answer 为某 label；
+ *   short_answer 的 options 必须为空数组；knowledge_points 为字符串数组（可选）。
+ * 成功返回 0；失败返回 -1（已向 conn 发送 400 响应）。
+ * 输出参数均为 malloc 副本（analysis 可为 NULL），调用者负责释放。 */
+static int extract_question_fields(struct MHD_Connection *conn,
+                                   const cJSON *root,
+                                   char **out_content,
+                                   char **out_type,
+                                   char **out_answer,
+                                   char **out_analysis,
+                                   char **out_options_json,
+                                   char **out_kp_json) {
+    *out_content = *out_type = *out_answer = *out_analysis = NULL;
+    *out_options_json = *out_kp_json = NULL;
+
+    char *content = json_get_string(root, "content");
+    if (content == NULL || content[0] == '\0') {
+        free(content);
+        reply_error(conn, MHD_HTTP_BAD_REQUEST, "content 为必填非空字段");
+        return -1;
+    }
+
+    char *type = json_get_string(root, "type");
+    if (type == NULL || (strcmp(type, "single_choice") != 0 &&
+                         strcmp(type, "short_answer") != 0)) {
+        free(content);
+        free(type);
+        reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                    "type 仅支持 single_choice 或 short_answer");
+        return -1;
+    }
+
+    char *answer = json_get_string(root, "answer");
+    if (answer == NULL || answer[0] == '\0') {
+        free(content);
+        free(type);
+        free(answer);
+        reply_error(conn, MHD_HTTP_BAD_REQUEST, "answer 为必填非空字段");
+        return -1;
+    }
+
+    char *analysis = json_get_string(root, "analysis");  /* 可选 */
+
+    /* options：single_choice 必须为非空 {label,text} 数组；short_answer 必须为空数组 */
+    cJSON *options = cJSON_GetObjectItem(root, "options");
+    char *options_json = NULL;
+    if (options != NULL) {
+        if (!cJSON_IsArray(options)) {
+            free(content); free(type); free(answer); free(analysis);
+            reply_error(conn, MHD_HTTP_BAD_REQUEST, "options 必须为数组");
+            return -1;
+        }
+        int n = cJSON_GetArraySize(options);
+        if (strcmp(type, "single_choice") == 0) {
+            if (n == 0) {
+                free(content); free(type); free(answer); free(analysis);
+                reply_error(conn, MHD_HTTP_BAD_REQUEST, "单选题至少需要 1 个选项");
+                return -1;
+            }
+            int answer_in_options = 0;
+            for (int i = 0; i < n; i++) {
+                cJSON *item = cJSON_GetArrayItem(options, i);
+                cJSON *label = item ? cJSON_GetObjectItem(item, "label") : NULL;
+                cJSON *text  = item ? cJSON_GetObjectItem(item, "text") : NULL;
+                if (!cJSON_IsObject(item) || label == NULL || !cJSON_IsString(label) ||
+                    label->valuestring[0] == '\0' || text == NULL || !cJSON_IsString(text) ||
+                    text->valuestring[0] == '\0') {
+                    free(content); free(type); free(answer); free(analysis);
+                    reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                                "每个选项需包含非空的 label 与 text");
+                    return -1;
+                }
+                if (strcmp(label->valuestring, answer) == 0) answer_in_options = 1;
+            }
+            if (!answer_in_options) {
+                free(content); free(type); free(answer); free(analysis);
+                reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                            "answer 必须是某个选项的 label");
+                return -1;
+            }
+        } else {
+            if (n != 0) {
+                free(content); free(type); free(answer); free(analysis);
+                reply_error(conn, MHD_HTTP_BAD_REQUEST, "简答题 options 必须为空数组");
+                return -1;
+            }
+        }
+        options_json = cJSON_PrintUnformatted(options);
+    } else if (strcmp(type, "single_choice") == 0) {
+        free(content); free(type); free(answer); free(analysis);
+        reply_error(conn, MHD_HTTP_BAD_REQUEST, "单选题必须提供 options");
+        return -1;
+    } else {
+        options_json = strdup("[]");
+    }
+
+    /* knowledge_points：可选字符串数组 */
+    cJSON *kp = cJSON_GetObjectItem(root, "knowledge_points");
+    char *kp_json = NULL;
+    if (kp != NULL) {
+        if (!cJSON_IsArray(kp)) {
+            free(content); free(type); free(answer); free(analysis);
+            cJSON_free(options_json);
+            reply_error(conn, MHD_HTTP_BAD_REQUEST, "knowledge_points 必须为数组");
+            return -1;
+        }
+        for (int i = 0; i < cJSON_GetArraySize(kp); i++) {
+            cJSON *item = cJSON_GetArrayItem(kp, i);
+            if (!cJSON_IsString(item)) {
+                free(content); free(type); free(answer); free(analysis);
+                cJSON_free(options_json);
+                reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                            "knowledge_points 必须为字符串数组");
+                return -1;
+            }
+        }
+        kp_json = cJSON_PrintUnformatted(kp);
+    } else {
+        kp_json = strdup("[]");
+    }
+
+    *out_content = content;
+    *out_type = type;
+    *out_answer = answer;
+    *out_analysis = analysis;
+    *out_options_json = options_json;
+    *out_kp_json = kp_json;
+    return 0;
+}
+
+static void free_question_fields(char *content, char *type, char *answer,
+                                 char *analysis, char *options_json,
+                                 char *kp_json) {
+    free(content);
+    free(type);
+    free(answer);
+    free(analysis);
+    cJSON_free(options_json);
+    cJSON_free(kp_json);
+}
+
+/* POST /api/v1/questions：新增题目（teacher/admin） */
+static enum MHD_Result handle_question_create(struct MHD_Connection *conn,
+                                              const char *body, size_t body_len,
+                                              const AppConfig *cfg,
+                                              const Session *s) {
+    (void)body_len;
+    if (body == NULL || body[0] == '\0')
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "请求体为空");
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL)
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "JSON 解析失败");
+
+    char *content, *type, *answer, *analysis, *options_json, *kp_json;
+    if (extract_question_fields(conn, root, &content, &type, &answer,
+                                &analysis, &options_json, &kp_json) != 0) {
+        cJSON_Delete(root);
+        return MHD_YES;
+    }
+    cJSON_Delete(root);
+
+    int id = next_question_id(cfg->db);
+    if (id <= 0) {
+        free_question_fields(content, type, answer, analysis, options_json, kp_json);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "create question failed");
+    }
+
+    char key[32];
+    snprintf(key, sizeof(key), "%d", id);
+    char tid[32];
+    snprintf(tid, sizeof(tid), "%d", s->user_id);
+
+    if (kv_set(cfg->db, "qdata", key, "content", content) != 0 ||
+        kv_set(cfg->db, "qdata", key, "options", options_json) != 0 ||
+        kv_set(cfg->db, "qdata", key, "answer", answer) != 0 ||
+        kv_set(cfg->db, "qdata", key, "analysis",
+               analysis ? analysis : "") != 0 ||
+        kv_set(cfg->db, "qdata", key, "type", type) != 0 ||
+        kv_set(cfg->db, "qdata", key, "knowledge_points", kp_json) != 0 ||
+        kv_set(cfg->db, "qdata", key, "teacher_id", tid) != 0 ||
+        kv_set(cfg->db, "qdata", key, "status", "active") != 0) {
+        free_question_fields(content, type, answer, analysis, options_json, kp_json);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "create question failed");
+    }
+    free_question_fields(content, type, answer, analysis, options_json, kp_json);
+
+    cJSON *question = kv_to_question(key, cfg->db);
+    if (question == NULL) {
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "create question failed");
+    }
+    cJSON *resp = cJSON_CreateObject();
+    if (resp == NULL) {
+        cJSON_Delete(question);
+        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "{\"error\":\"oom\"}");
+    }
+    cJSON_AddItemToObject(resp, "question", question);
+    char *json = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    enum MHD_Result ret = reply_json(conn, MHD_HTTP_CREATED, json);
+    cJSON_free(json);
+    return ret;
+}
+
+/* PUT /api/v1/questions/{id}：修改题目（teacher/admin；部分更新，未提供字段保留） */
+static enum MHD_Result handle_question_update(struct MHD_Connection *conn,
+                                              const char *url, const char *body,
+                                              size_t body_len, const AppConfig *cfg) {
+    (void)body_len;
+    long long id = parse_question_id(conn, url);
+    if (id == 0) return MHD_YES;
+
+    char key[32];
+    snprintf(key, sizeof(key), "%lld", id);
+
+    /* 目标题目必须存在 */
+    cJSON *old = kv_to_question(key, cfg->db);
+    if (old == NULL) {
+        return reply_error(conn, MHD_HTTP_NOT_FOUND, "question not found");
+    }
+
+    if (body == NULL || body[0] == '\0') {
+        cJSON_Delete(old);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "请求体为空");
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        cJSON_Delete(old);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST, "JSON 解析失败");
+    }
+
+    /* 合并：以旧题为基，请求体中出现的字段覆盖（id 不可修改） */
+    cJSON *merged = cJSON_Duplicate(old, 1);
+    cJSON_Delete(old);
+    if (merged == NULL) {
+        cJSON_Delete(root);
+        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "{\"error\":\"oom\"}");
+    }
+    cJSON_DeleteItemFromObject(merged, "id");
+
+    static const char *editable[] = {
+        "content", "answer", "analysis", "type",
+        "options", "knowledge_points"
+    };
+    for (size_t i = 0; i < sizeof(editable) / sizeof(editable[0]); i++) {
+        cJSON *item = cJSON_GetObjectItem(root, editable[i]);
+        if (item != NULL) {
+            cJSON_DeleteItemFromObject(merged, editable[i]);
+            cJSON_AddItemToObject(merged, editable[i], cJSON_Duplicate(item, 1));
+        }
+    }
+    /* 请求体必须包含至少一个可更新字段（空对象视为非法） */
+    int has_field = 0;
+    for (size_t i = 0; i < sizeof(editable) / sizeof(editable[0]); i++) {
+        if (cJSON_GetObjectItem(root, editable[i]) != NULL) {
+            has_field = 1;
+            break;
+        }
+    }
+    if (!has_field) {
+        cJSON_Delete(root);
+        cJSON_Delete(merged);
+        return reply_error(conn, MHD_HTTP_BAD_REQUEST,
+                           "请求体未包含任何可更新字段");
+    }
+    cJSON_Delete(root);
+
+    /* 用合并后的完整负载做统一校验，保证 answer/options/type 一致 */
+    char *content, *type, *answer, *analysis, *options_json, *kp_json;
+    if (extract_question_fields(conn, merged, &content, &type, &answer,
+                                &analysis, &options_json, &kp_json) != 0) {
+        cJSON_Delete(merged);
+        return MHD_YES;
+    }
+    cJSON_Delete(merged);
+
+    if (kv_set(cfg->db, "qdata", key, "content", content) != 0 ||
+        kv_set(cfg->db, "qdata", key, "options", options_json) != 0 ||
+        kv_set(cfg->db, "qdata", key, "answer", answer) != 0 ||
+        kv_set(cfg->db, "qdata", key, "analysis",
+               analysis ? analysis : "") != 0 ||
+        kv_set(cfg->db, "qdata", key, "type", type) != 0 ||
+        kv_set(cfg->db, "qdata", key, "knowledge_points", kp_json) != 0) {
+        free_question_fields(content, type, answer, analysis, options_json, kp_json);
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "update question failed");
+    }
+    free_question_fields(content, type, answer, analysis, options_json, kp_json);
+
+    cJSON *question = kv_to_question(key, cfg->db);
+    if (question == NULL) {
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "update question failed");
+    }
+    cJSON *resp = cJSON_CreateObject();
+    if (resp == NULL) {
+        cJSON_Delete(question);
+        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "{\"error\":\"oom\"}");
+    }
+    cJSON_AddItemToObject(resp, "question", question);
+    char *json = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
+    cJSON_free(json);
+    return ret;
+}
+
+/* DELETE /api/v1/questions/{id}：删除题目（teacher/admin） */
+static enum MHD_Result handle_question_delete(struct MHD_Connection *conn,
+                                              const char *url,
+                                              const AppConfig *cfg) {
+    long long id = parse_question_id(conn, url);
+    if (id == 0) return MHD_YES;
+
+    char key[32];
+    snprintf(key, sizeof(key), "%lld", id);
+
+    cJSON *question = kv_to_question(key, cfg->db);
+    if (question == NULL) {
+        return reply_error(conn, MHD_HTTP_NOT_FOUND, "question not found");
+    }
+    cJSON_Delete(question);
+
+    if (kv_delete_key(cfg->db, "qdata", key) != 0) {
+        return reply_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "delete question failed");
+    }
+    return reply_json(conn, MHD_HTTP_OK, "{\"status\":\"ok\"}");
+}
+
 static enum MHD_Result handle_questions(struct MHD_Connection *conn,
                                         const char *url, const char *method,
+                                        const char *body, size_t body_len,
                                         const AppConfig *cfg) {
     const char *auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
-    if (session_validate(extract_bearer_token(auth)) == NULL) {
+    Session *s = session_validate(extract_bearer_token(auth));
+    if (s == NULL) {
         return reply_json(conn, MHD_HTTP_UNAUTHORIZED,
                           "{\"error\":\"未登录或 token 已过期\"}");
     }
-    if (strcmp(method, "GET") != 0) {
-        struct MHD_Response *resp = MHD_create_response_from_buffer(
-            sizeof("{\"error\":\"method not allowed\"}") - 1,
-            (void *)"{\"error\":\"method not allowed\"}", MHD_RESPMEM_PERSISTENT);
-        if (resp == NULL) return MHD_NO;
-        MHD_add_response_header(resp, "Content-Type", "application/json; charset=utf-8");
-        MHD_add_response_header(resp, "Allow", "GET");
-        enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_METHOD_NOT_ALLOWED, resp);
-        MHD_destroy_response(resp);
-        return ret;
+
+    /* 写操作仅教师/管理员可执行 */
+    if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 ||
+        strcmp(method, "DELETE") == 0) {
+        if (strcmp(s->role, "teacher") != 0 && strcmp(s->role, "admin") != 0) {
+            return reply_error(conn, MHD_HTTP_FORBIDDEN,
+                               "仅教师或管理员可执行此操作");
+        }
     }
 
-    /* 读接口不创建空数据库；数据库丢失应是 500，不能伪装成空列表或 404。 */
-    if (access(cfg->db_path, R_OK) != 0) {
-        return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                          "{\"error\":\"query questions failed\"}");
-    }
-
-    if (strcmp(url, "/api/v1/questions") == 0) {
-        /* 列表：遍历 kv_store 中的 questions namespace */
-        int count;
-        char **keys = kv_list_keys(cfg->db, "qdata", &count);
-        if (keys == NULL) {
+    if (strcmp(method, "GET") == 0) {
+        /* 读接口不创建空数据库；数据库丢失应是 500，不能伪装成空列表或 404。 */
+        if (access(cfg->db_path, R_OK) != 0) {
             return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
                               "{\"error\":\"query questions failed\"}");
         }
 
-        cJSON *root = cJSON_CreateObject();
-        cJSON *arr  = cJSON_AddArrayToObject(root, "questions");
-        for (int i = 0; i < count; i++) {
-            cJSON *q = kv_to_question(keys[i], cfg->db);
-            if (q) cJSON_AddItemToArray(arr, q);
-        }
-        kv_free_str_array(keys);
+        if (strcmp(url, "/api/v1/questions") == 0) {
+            /* 列表：遍历 kv_store 中的 questions namespace */
+            int count;
+            char **keys = kv_list_keys(cfg->db, "qdata", &count);
+            if (keys == NULL) {
+                return reply_json(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                                  "{\"error\":\"query questions failed\"}");
+            }
 
-        char *json = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-        enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
-        cJSON_free(json);
-        return ret;
-    } else {
-        /* 单题查询 */
-        const char *id_text = url + sizeof("/api/v1/questions/") - 1;
-        if (*id_text == '\0') {
-            return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
-        }
-        for (const char *p = id_text; *p != '\0'; p++) {
-            if (*p < '0' || *p > '9') {
+            cJSON *root = cJSON_CreateObject();
+            cJSON *arr  = cJSON_AddArrayToObject(root, "questions");
+            for (int i = 0; i < count; i++) {
+                cJSON *q = kv_to_question(keys[i], cfg->db);
+                if (q) cJSON_AddItemToArray(arr, q);
+            }
+            kv_free_str_array(keys);
+
+            char *json = cJSON_PrintUnformatted(root);
+            cJSON_Delete(root);
+            enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
+            cJSON_free(json);
+            return ret;
+        } else {
+            /* 单题查询 */
+            long long id = parse_question_id(conn, url);
+            if (id == 0) return MHD_YES;
+
+            char key[32];
+            snprintf(key, sizeof(key), "%lld", id);
+
+            cJSON *question = kv_to_question(key, cfg->db);
+            if (question == NULL) {
                 return reply_json(conn, MHD_HTTP_NOT_FOUND,
                                   "{\"error\":\"question not found\"}");
             }
-        }
-        errno = 0;
-        char *end = NULL;
-        long long id = strtoll(id_text, &end, 10);
-        if (errno == ERANGE || end == id_text || *end != '\0' || id <= 0) {
-            return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
-        }
 
-        char key[32];
-        snprintf(key, sizeof(key), "%lld", id);
-
-        cJSON *question = kv_to_question(key, cfg->db);
-        if (question == NULL) {
-            return reply_json(conn, MHD_HTTP_NOT_FOUND, "{\"error\":\"question not found\"}");
+            cJSON *root = cJSON_CreateObject();
+            cJSON_AddItemToObject(root, "question", question);
+            char *json = cJSON_PrintUnformatted(root);
+            cJSON_Delete(root);
+            enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
+            cJSON_free(json);
+            return ret;
         }
-
-        cJSON *root = cJSON_CreateObject();
-        cJSON_AddItemToObject(root, "question", question);
-        char *json = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-        enum MHD_Result ret = reply_json(conn, MHD_HTTP_OK, json);
-        cJSON_free(json);
-        return ret;
     }
+
+    if (strcmp(method, "POST") == 0 &&
+        strcmp(url, "/api/v1/questions") == 0) {
+        return handle_question_create(conn, body, body_len, cfg, s);
+    }
+
+    if (strcmp(method, "PUT") == 0 &&
+        strncmp(url, "/api/v1/questions/", sizeof("/api/v1/questions/") - 1) == 0) {
+        return handle_question_update(conn, url, body, body_len, cfg);
+    }
+
+    if (strcmp(method, "DELETE") == 0 &&
+        strncmp(url, "/api/v1/questions/", sizeof("/api/v1/questions/") - 1) == 0) {
+        return handle_question_delete(conn, url, cfg);
+    }
+
+    /* 其余方法 → 405 */
+    struct MHD_Response *resp = MHD_create_response_from_buffer(
+        sizeof("{\"error\":\"method not allowed\"}") - 1,
+        (void *)"{\"error\":\"method not allowed\"}", MHD_RESPMEM_PERSISTENT);
+    if (resp == NULL) return MHD_NO;
+    MHD_add_response_header(resp, "Content-Type", "application/json; charset=utf-8");
+    MHD_add_response_header(resp, "Allow", "GET, POST, PUT, DELETE");
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_METHOD_NOT_ALLOWED, resp);
+    MHD_destroy_response(resp);
+    return ret;
 }
 
 
@@ -825,11 +1217,13 @@ enum MHD_Result route_dispatch(struct MHD_Connection *conn, const char *url,
         return handle_me(conn);
     }
 
-    /* 只匹配题目列表及详情路径；沿用现有会话校验。 */
+    /* GET /api/v1/ai/access：统一 AI 授权查询（来自 PR #14） */
     if (strcmp(url, "/api/v1/ai/access") == 0) return handle_ai_access(conn, method, cfg);
+
+    /* 题目接口：GET 只读；POST/PUT/DELETE 写操作（teacher/admin）。 */
     if (strcmp(url, "/api/v1/questions") == 0 ||
         strncmp(url, "/api/v1/questions/", sizeof("/api/v1/questions/") - 1) == 0) {
-        return handle_questions(conn, url, method, cfg);
+        return handle_questions(conn, url, method, body, body_len, cfg);
     }
 
     if (strcmp(url, "/api/v1/chat") == 0 ||

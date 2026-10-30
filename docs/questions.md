@@ -1,6 +1,7 @@
-# 第一阶段固定题目模块（李俊熠）
+# 第一阶段题目模块（李俊熠 / 题目 CRUD）
 
-实现范围来自《第一阶段开发计划与 AI 协作指南》第一部分 1.2：固定题 seed、列表、详情和回归。
+实现范围来自《第一阶段开发计划与 AI 协作指南》第一部分 1.2：固定题 seed、列表、详情和回归；
+后由题目增删改（CRUD）PR 扩展出新增、修改、删除三个写接口。
 
 ## 数据初始化
 
@@ -12,12 +13,18 @@
 - 旧库只增加字段与缺失的 seed，保留原有数据和 id。新库默认题目 id 为 1–5；
   **前端必须使用列表返回的 id，不可硬编码 id 或题目数量。**
 - 本阶段 Demo 题目由管理员持有，teacher_id 从现有 admin 账号查询；不引入多租户功能。
-- `teacher_id`、`tags`、`status`、`created_at` 等已有字段继续保留，以便后续扩展。
+  `teacher_id`、`tags`、`status`、`created_at` 等已有字段继续保留，以便后续扩展。
+- 写接口新增的题目 id 由服务端分配（当前最大 id + 1），`teacher_id` 记录创建者，
+  `status` 固定为 `active`，不写入 `seed_key`。
 
 ## 接口契约（供题目列表页、对话页与 api.md 维护者使用）
 
-两个接口均需登录取得 token，然后携带 `Authorization: Bearer <token>`。
-管理员、学生及现有有效会话使用相同的只读接口。未登录、无效或已登出 token 返回 401。
+所有题目接口均需登录取得 token，然后携带 `Authorization: Bearer <token>`。
+未登录、无效或已登出 token 返回 401。
+
+读接口（GET 列表/详情）：管理员、教师、学生及现有有效会话使用相同的只读接口。
+写接口（POST 新增 / PUT 修改 / DELETE 删除）：仅 `teacher` 与 `admin` 角色可调用，
+`student` 返回 403（权限检查先于题目存在性校验）。
 
 ### GET /api/v1/questions
 
@@ -52,12 +59,58 @@
 简答题 answer 是文本且 options 为 `[]`；知识点始终为字符串数组。
 旧表迁移的记录缺少选项/知识点时以空数组返回，不捏造内容。
 
+### POST /api/v1/questions（teacher/admin，新增）
+
+请求体为题目字段（不含 id/status，服务端分配）：
+
+```json
+{
+  "content": "新增题：2 + 2 = ?",
+  "type": "single_choice",
+  "options": [
+    {"label": "A", "text": "3"},
+    {"label": "B", "text": "4"},
+    {"label": "C", "text": "5"},
+    {"label": "D", "text": "6"}
+  ],
+  "answer": "B",
+  "analysis": "2 + 2 = 4。",
+  "knowledge_points": ["加法"]
+}
+```
+
+字段校验：`content` 必填非空；`type` 必填且为 `single_choice`/`short_answer`；
+`answer` 必填非空；`options` 为数组（single_choice 必须非空且每项含非空 `label`/`text`、
+`answer` 须为某选项 label；short_answer 必须为空数组）；`analysis`/`knowledge_points` 可选
+（knowledge_points 须为字符串数组）。
+
+成功：`201` + `{"question":{题目对象}}`（与 GET 详情同构）。
+失败：`400` 请求体缺失/JSON 非法/字段校验失败；`401` 未登录；`403` 学生越权；`500` 存储失败。
+
+### PUT /api/v1/questions/{id}（teacher/admin，修改）
+
+部分更新：请求体中出现的字段覆盖旧值，未提供的字段保留；`id` 不可修改。
+校验基于「旧题 + 请求覆盖」合并后的完整题目执行，因此与 POST 规则一致
+（例如把 answer 改为不在新 options 内的 label 会返回 400）。
+
+成功：`200` + `{"question":{题目对象}}`。
+失败：`404` 题目不存在/id 非法；`400` 字段校验失败；`401`/`403` 同 POST。
+
+### DELETE /api/v1/questions/{id}（teacher/admin，删除）
+
+成功：`200` + `{"status":"ok"}`（删除后该 id 的 GET 返回 404）。
+失败：`404` 题目不存在/id 非法；`401` 未登录；`403` 学生越权。
+
 | 状态码 | 响应 | 场景 |
 | --- | --- | --- |
+| 200 | 见各接口 | GET 列表/详情、PUT、DELETE 成功 |
+| 201 | `{"question":{...}}` | POST 创建成功 |
+| 400 | `{"error":"..."}` | 请求体缺失/JSON 非法/字段校验失败（写接口） |
 | 401 | `{"error":"未登录或 token 已过期"}` | 无有效会话，优先于题目参数校验 |
+| 403 | `{"error":"仅教师或管理员可执行此操作"}` | 非 teacher/admin 调用写接口 |
 | 404 | `{"error":"question not found"}` | 不存在/非 active 题目，或不是正整数的 id、溢出、额外路径段 |
-| 405 | `{"error":"method not allowed"}` | 登录后对题目接口使用非 GET 方法；响应含 `Allow: GET` |
-| 500 | `{"error":"query questions failed"}` | 数据库不可读、查询/JSON 处理失败 |
+| 405 | `{"error":"method not allowed"}` | 登录后对题目接口使用 GET/POST/PUT/DELETE 之外的方法；响应含 `Allow: GET, POST, PUT, DELETE` |
+| 500 | `{"error":"query/create/update/delete question failed"}` | 数据库不可读、查询/JSON 处理失败 |
 
 id 必须是正的十进制整数。客户端先登录，再 GET 列表，点击后用该条 id GET 详情；
 将 id 传给对话接口的实现者。客户端收到 401 应提示重新登录。

@@ -96,16 +96,17 @@ elif mode == "access":
             status, body, _ = request(path, token)
             assert status == 401 and set(body) == {"error"}
     token = login("admin")
-    for method in ("POST", "PUT", "DELETE"):
+    for method in ("PATCH", "OPTIONS"):
         status, body, headers = request("/api/v1/questions", token, method=method)
-        assert status == 405 and set(body) == {"error"} and headers["Allow"] == "GET"
+        assert status == 405 and set(body) == {"error"}
+        assert headers["Allow"] == "GET, POST, PUT, DELETE"
     status, _, _ = request("/api/v1/questionsXYZ", token)
     assert status == 404
     status, _, _ = request("/api/v1/auth/logout", token, method="POST")
     assert status == 200
     status, body, _ = request("/api/v1/questions", token)
     assert status == 401 and set(body) == {"error"}
-    print("PASS: 缺失/无效/登出 token 返回 401；只读接口返回 405 + Allow")
+    print("PASS: 缺失/无效/登出 token 返回 401；不支持的方法返回 405 + Allow")
 elif mode == "storage_error":
     token = login("student")
     database = Path(os.environ["DATABASE_PATH"])
@@ -121,5 +122,173 @@ elif mode == "storage_error":
         backup.rename(database)
     assert len(list_questions(token)) == 5
     print("PASS: 数据库不可读返回 JSON 500；恢复后接口正常")
+elif mode == "create":
+    token = login("admin")
+    created = []
+
+    def make_question(payload):
+        status, body, _ = request("/api/v1/questions", token, method="POST", data=payload)
+        assert status == 201, (status, payload)
+        question = body["question"]
+        check_question(question)
+        created.append(question["id"])
+        return question
+
+    before = list_questions(token)
+    single = make_question({
+        "content": "新增单选题：2 + 2 = ?",
+        "type": "single_choice",
+        "options": [{"label": "A", "text": "3"}, {"label": "B", "text": "4"},
+                    {"label": "C", "text": "5"}, {"label": "D", "text": "6"}],
+        "answer": "B",
+        "analysis": "2 + 2 = 4。",
+        "knowledge_points": ["加法"],
+    })
+    assert single["content"] == "新增单选题：2 + 2 = ?"
+    assert single["type"] == "single_choice" and single["answer"] == "B"
+    assert single["id"] not in {q["id"] for q in before}
+    assert len(list_questions(token)) == len(before) + 1
+
+    short = make_question({
+        "content": "新增简答题：简述牛顿第一定律。",
+        "type": "short_answer",
+        "options": [],
+        "answer": "惯性定律",
+        "analysis": "物体在不受外力时保持静止或匀速直线运动。",
+        "knowledge_points": ["力学"],
+    })
+    assert short["type"] == "short_answer"
+    assert short["options"] == [] and short["answer"] == "惯性定律"
+
+    # 非法负载 → 400
+    bad_payloads = [
+        {"type": "single_choice", "options": [{"label": "A", "text": "1"}], "answer": "A"},      # 缺 content
+        {"content": "x", "type": "essay", "answer": "y"},                                         # type 非法
+        {"content": "x", "type": "single_choice", "answer": "A"},                                 # 缺 options
+        {"content": "x", "type": "single_choice", "options": [], "answer": "A"},                  # 空选项
+        {"content": "x", "type": "single_choice",
+         "options": [{"label": "A", "text": "1"}, {"label": "B", "text": "2"}], "answer": "C"},   # answer 不在选项
+        {"content": "x", "type": "short_answer",
+         "options": [{"label": "A", "text": "1"}], "answer": "y"},                                # 简答带选项
+        {"content": "x", "type": "single_choice",
+         "options": [{"label": "", "text": "1"}, {"label": "B", "text": "2"}], "answer": "B"},    # 空 label
+        {"content": "x", "type": "single_choice", "options": "not-array", "answer": "A"},         # options 非数组
+    ]
+    for payload in bad_payloads:
+        status, body, _ = request("/api/v1/questions", token, method="POST", data=payload)
+        assert status == 400, (status, payload)
+        assert set(body) == {"error"}
+    status, body, _ = request("/api/v1/questions", token, method="POST", data={})
+    assert status == 400
+
+    # 清理创建的题目，保持共享测试库干净
+    for qid in created:
+        status, _, _ = request("/api/v1/questions/" + str(qid), token, method="DELETE")
+        assert status == 200
+    assert len(list_questions(token)) == len(before)
+    print("PASS: 创建 single_choice/short_answer 成功；非法负载 400；用例自清理")
+elif mode == "update":
+    token = login("admin")
+    status, body, _ = request("/api/v1/questions", token, method="POST", data={
+        "content": "待更新题：1+1=?",
+        "type": "single_choice",
+        "options": [{"label": "A", "text": "1"}, {"label": "B", "text": "2"},
+                    {"label": "C", "text": "3"}, {"label": "D", "text": "4"}],
+        "answer": "B",
+        "knowledge_points": ["加法"],
+    })
+    assert status == 201
+    qid = body["question"]["id"]
+    try:
+        # 部分更新：只改 answer 与 analysis，其余字段保留
+        status, body, _ = request("/api/v1/questions/" + str(qid), token, method="PUT",
+                                  data={"answer": "D", "analysis": "新解析"})
+        assert status == 200
+        question = body["question"]
+        assert question["id"] == qid
+        assert question["answer"] == "D"
+        assert question["analysis"] == "新解析"
+        assert question["content"] == "待更新题：1+1=?"
+        assert question["type"] == "single_choice"
+        assert len(question["options"]) == 4
+        # 整体改题型 → short_answer（options 必须为空）
+        status, body, _ = request("/api/v1/questions/" + str(qid), token, method="PUT",
+                                  data={"type": "short_answer", "options": [], "answer": "2"})
+        assert status == 200 and body["question"]["type"] == "short_answer"
+        assert body["question"]["options"] == []
+        # 错误路径
+        status, _, _ = request("/api/v1/questions/999999", token, method="PUT",
+                               data={"content": "x"})
+        assert status == 404
+        status, _, _ = request("/api/v1/questions/" + str(qid), token, method="PUT", data={})
+        assert status == 400
+        # 一致性：answer 不在新选项 → 400
+        status, _, _ = request("/api/v1/questions/" + str(qid), token, method="PUT",
+                               data={"type": "single_choice",
+                                     "options": [{"label": "A", "text": "1"},
+                                                 {"label": "B", "text": "2"}],
+                                     "answer": "Z"})
+        assert status == 400
+    finally:
+        status, _, _ = request("/api/v1/questions/" + str(qid), token, method="DELETE")
+        assert status == 200
+    print("PASS: 部分更新保留未传字段；跨字段一致性校验；404/400 错误路径")
+elif mode == "delete":
+    token = login("admin")
+    created = []
+    try:
+        for content in ("待删题1", "待删题2"):
+            status, body, _ = request("/api/v1/questions", token, method="POST", data={
+                "content": content, "type": "short_answer", "options": [],
+                "answer": "答案", "knowledge_points": ["测试"],
+            })
+            assert status == 201
+            created.append(body["question"]["id"])
+        qid = created[0]
+        before = list_questions(token)
+        status, body, _ = request("/api/v1/questions/" + str(qid), token, method="DELETE")
+        assert status == 200 and body == {"status": "ok"}
+        status, _, _ = request("/api/v1/questions/" + str(qid), token)
+        assert status == 404
+        after = list_questions(token)
+        assert len(after) == len(before) - 1
+        assert qid not in {q["id"] for q in after}
+        # 重复删除 → 404；非法 id → 404
+        status, _, _ = request("/api/v1/questions/" + str(qid), token, method="DELETE")
+        assert status == 404
+        for invalid in ("0", "-1", "abc"):
+            status, _, _ = request("/api/v1/questions/" + invalid, token, method="DELETE")
+            assert status == 404
+    finally:
+        for qid in created:
+            request("/api/v1/questions/" + str(qid), token, method="DELETE")
+    print("PASS: 删除后不可读、列表减一、重复删除/非法 id 404；用例自清理")
+elif mode == "permission":
+    student = login("student")
+    teacher = login("teacher")
+    # student 写 → 403（权限检查先于 id 存在性）
+    for method, path in (("POST", "/api/v1/questions"),
+                         ("PUT", "/api/v1/questions/1"),
+                         ("DELETE", "/api/v1/questions/1")):
+        status, body, _ = request(path, student, method=method,
+                                  data={"content": "x", "type": "short_answer",
+                                        "options": [], "answer": "y"})
+        assert status == 403, (method, status)
+        assert set(body) == {"error"}
+    # teacher 可创建与删除
+    status, body, _ = request("/api/v1/questions", teacher, method="POST", data={
+        "content": "teacher 创建题", "type": "short_answer", "options": [],
+        "answer": "ok", "knowledge_points": ["权限"],
+    })
+    assert status == 201
+    qid = body["question"]["id"]
+    status, _, _ = request("/api/v1/questions/" + str(qid), teacher, method="DELETE")
+    assert status == 200
+    # 未登录 → 401
+    status, _, _ = request("/api/v1/questions", method="POST",
+                           data={"content": "x", "type": "short_answer",
+                                 "options": [], "answer": "y"})
+    assert status == 401
+    print("PASS: student 写操作 403；teacher 可创建/删除；未登录 401")
 else:
     raise ValueError(mode)
